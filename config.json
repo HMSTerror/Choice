@@ -1,0 +1,57 @@
+{
+  "seed": 100,
+  "threads": 4,
+  "history_length": 10,
+  "hidden_size": 256,
+  "sasrec": {
+    "epochs": 0,
+    "patience": 10,
+    "batch_size": 128,
+    "learning_rate": 0.001,
+    "dropout": 0.2,
+    "heads": 2,
+    "layers": 1,
+    "negatives": 64,
+    "candidate_count": 100
+  },
+  "destination": {
+    "candidate_gate": "fixed_mass",
+    "candidate_mass": 0.010228021396912973,
+    "neighbor_mix": 0.02,
+    "neighbor_count": 16,
+    "neighbor_lags": 3,
+    "neighbor_self_prior": 1.0,
+    "history_decay": 0.2
+  },
+  "diffusion": {
+    "fine_size": 64,
+    "coarse_size": 1024,
+    "partition_seed": 100,
+    "level_rates": [0.44331665265786585, 0.056307509356157304, 1.8029609309800227],
+    "reset_rate": 0.035022323695187436,
+    "sigma_min": 0.001,
+    "sigma_max": 10.0,
+    "training_intervals": 20,
+    "reverse_intervals": 20,
+    "reverse_cfl": 0.27672918,
+    "log_exit_cap": 8.1,
+    "max_substeps": 16384
+  },
+  "training": {
+    "epochs": 0,
+    "patience": 50,
+    "validation_interval": 10,
+    "batch_size": 256,
+    "eval_batch_size": 128,
+    "learning_rate": 0.0006167980008189615,
+    "dropout": 0.1,
+    "heads": 2,
+    "embedding_std": 0.1,
+    "log_score_cap": 4.0,
+    "guidance_strength": 2.0,
+    "ema_decay": 0.9999,
+    "gradient_clip": 1.0,
+    "validation_streams": 1,
+    "test_streams": 3
+  }
+}
