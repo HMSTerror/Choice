@@ -420,12 +420,14 @@ def summary(root):
     write_json(destination / "partition_reml.json", reml)
     contract = json.loads((root / "workflow_config.json").read_text(encoding="utf-8"))
     control_seeds = contract["suite"]["control_seeds"]
+    main_seeds = contract["suite"].get("main_seeds", contract["suite"]["seeds"])
     table_groups = {"table1_main": set(MAIN),
                     "table2_factorial": set(FACTORIAL),
                     "table3_auxiliary": {"choicegrow", "prefergrow", "guided_negatives", "popularity"},
                     "table3_forward_toys": {"proposal_root", "proposal_hierarchy", "dynamic_mass", "history_swap", "choicegrow", "uniform_rate", "real_scope"}}
     for name, arms in table_groups.items():
         selected = [r for r in rows if r["experiment"] in arms and
+                    (name != "table1_main" or r["seed"] in main_seeds) and
                     (name != "table3_forward_toys" or r["dataset"] == "Toys") and
                     (name != "table3_auxiliary" or r["seed"] in control_seeds) and
                     (Path(r["report"]).name == "report.json" or (name == "table3_auxiliary" and Path(r["report"]).name == "report_score_fusion.json"))]
@@ -466,12 +468,13 @@ def summary(root):
 
 def jobs(suite, datasets, seeds, groups):
     result = {}
+    main_seeds = set(suite.get("main_seeds", seeds))
     def add(dataset, seed, arm, group, partition=None):
         key = (dataset, seed, arm, partition)
         result.setdefault(key, {"dataset": dataset, "seed": seed, "arm": arm, "groups": [], "partition": partition})["groups"].append(group)
     for dataset in datasets:
         for seed in seeds:
-            if "main" in groups:
+            if "main" in groups and seed in main_seeds:
                 for arm in MAIN:
                     add(dataset, seed, arm, "main")
             if "factorial" in groups or "initialization" in groups or "matched_exit" in groups:
@@ -610,6 +613,11 @@ def main(argv=None):
         suite["tuning"]["enabled"] = False
     if not seeds or len(set(seeds)) != len(seeds) or not set(seeds).issubset(suite["seeds"]):
         raise ValueError(f"Choose distinct --seeds from {suite['seeds']}")
+    main_seeds = suite.get("main_seeds", suite["seeds"])
+    if not main_seeds or len(set(main_seeds)) != len(main_seeds) or not set(main_seeds).issubset(suite["seeds"]):
+        raise ValueError(f"main_seeds must be a nonempty subset of {suite['seeds']}")
+    if "main" in groups and not set(seeds).intersection(main_seeds):
+        raise ValueError(f"Main table runs require at least one seed from {main_seeds}")
     for section in ("sasrec", "training"):
         if base[section]["epochs"] < 0 or base[section]["patience"] < 1:
             raise ValueError("Epoch limits must be nonnegative and early-stopping patience must be positive")

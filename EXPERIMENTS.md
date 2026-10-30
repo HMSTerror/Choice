@@ -4,7 +4,7 @@
 
 | 分组（`--groups`） | 实验 | 数据集与重复 |
 | --- | --- | --- |
-| `main` | SASRec、Caser、GRU4Rec、BERT4Rec、PreferDiff、DiffRec、DDSR、PreferGrow、ChoiceGrow | 四个数据集 × 六个种子；SASRec 复用候选阶段模型及测试 |
+| `main` | SASRec、Caser、GRU4Rec、BERT4Rec、PreferDiff、DiffRec、DDSR、PreferGrow、ChoiceGrow | 四个数据集 × 3 runs（seed 100–102）；SASRec 复用候选阶段模型及测试 |
 | `factorial` | Shared/Root、User/Root、Shared/Three-Level、User/Three-Level | 四个数据集 × 六个种子；完整模型与主表复用 |
 | `auxiliary` | PreferGrow 分数融合、候选引导负例；ChoiceGrow 流行度匹配候选 | 四个数据集 × 三个种子；基础模型与主表复用 |
 | `forward` | Proposal-Root、Proposal-Hierarchy、Dynamic-Mass、History-Swap、Shuffle-Scope、Uniform-Rate、Real-Scope | Toys × 六个种子；Shuffle-Scope 与主模型复用 |
@@ -21,7 +21,7 @@
 
 分数融合系数和引导负例权重也只按验证集选择。所有已选择的配置保存在 `runs/paper/selected/`。已有验证选定参数可填入 `paper_suite.json` 的 `dataset_overrides`，或用 `--skip-tuning` 使用 `config.json`，但三个阶段需保持设置一致。
 
-传统模型、PreferDiff、DiffRec 分别搜索学习率 `{.0001,.0003,.001}`；DDSR 额外交叉搜索跳步 `{100,50,35,28,23,20,17,15}`。它们分别选择自己的验证最佳配置，不继承 ChoiceGrow 搜索的学习率。SASRec 使用 `config.json` 中固定的参数；PreferGrow 使用清单内按数据集预设的 Hybrid gamma 和学习率。所有正式模型均执行六种子重训，除 SASRec 已在第二阶段训练完成。调参目录中不生成测试报告。
+传统模型、PreferDiff、DiffRec 分别搜索学习率 `{.0001,.0003,.001}`；DDSR 额外交叉搜索跳步 `{100,50,35,28,23,20,17,15}`。它们分别选择自己的验证最佳配置，不继承 ChoiceGrow 搜索的学习率。SASRec 使用 `config.json` 中固定的参数；PreferGrow 使用清单内按数据集预设的 Hybrid gamma 和学习率。主表模型在 3 个种子上重训；因子消融、前向对照和其他附录任务仍按各自清单使用六种子。调参目录中不生成测试报告。
 
 ## 主表模型实现与数据适配
 
@@ -30,8 +30,8 @@
 | 模型 | 实现 |
 | --- | --- |
 | SASRec | 一层因果 Transformer，ID 嵌入；正例与 64 个采样负例的 logistic 目标。候选只使用历史，排除历史中的物品，不读取目标。 |
-| GRU4Rec | GRU 编码真实长度历史，全目录交叉熵。 |
-| Caser | 水平卷积（高度 1—10）与垂直卷积，各 16 个通道，合并后全目录交叉熵。数据不含用户 ID，因此使用历史表示。 |
+| GRU4Rec | GRU 编码真实长度历史，使用 64 个均匀采样负例的 pointwise BCE 与 Adam；全目录打分用于评测。 |
+| Caser | 水平卷积（高度 1—10）与垂直卷积，各 16 个通道，item embedding 点积打分；使用 64 个均匀采样负例的 pointwise BCE 与 Adam。短历史先从左 padding 转为右 padding，再屏蔽 padding。数据不含用户 ID，因此使用历史表示。 |
 | BERT4Rec | 双向 Transformer；历史与训练目标拼接后，按 20% 比例执行 80/10/10 遮盖预测；测试在历史后追加 MASK，输出全目录分数。 |
 | PreferDiff | 固定文本特征上的目标向量高斯扩散；正/负重建差的偏好目标与正例重建混合（gamma=5，lambda=.5）；历史条件丢弃 .1，guidance=4，2000 步训练、100 步 DDIM 推理。 |
 | DiffRec | **Wang 等的交互向量版本**：训练重建历史与目标组成的二值交互向量；推理仅输入历史向量。MLP、x0 参数化、linear-var 低噪声、SNR 加权 MSE，默认 5 步与确定性逆向均值更新。 |
@@ -41,7 +41,7 @@
 
 语义源为仓库已有的物品描述向量：Steam 用 `bert_emb.pickle`（768 维），三个 Amazon 类别用 `3large_emb.pickle`（3072 维）。PreferDiff 用**只在训练出现物品上拟合**的 PCA 白化投影到 256 维；DDSR 在同一训练物品集合上拟合 OPQ，然后给整个目录编码。目录物品描述可用，但验证/测试交互和目标不参与拟合。`semantic.json` 记录来源、维度、训练物品数和量化方式。
 
-这些适配需要与原作者结果区分：当前源数据只有固定的历史—目标样本，没有用户 ID，DiffRec 因而使用每条样本的可见历史向量，不能恢复原版按完整用户交互聚合的训练矩阵。DDSR 在 Amazon 使用现有 OpenAI 文本向量，未重新生成原文的 BERT 特征；解码以全目录距离排名替代只返回单个物品。PreferDiff 使用投影后的固定特征和标准累计 alpha DDIM 更新。PreferGrow 共享本工程的去噪器和采样器。它们可以在同一评估协议下重训和比较，结果不应标为各原仓库原始配置的直接复现。
+论文正文及附录统一规定数据划分和全目录评测，但没有给出这些传统 baseline 的逐模型损失/优化器细节。GRU4Rec 与 Caser 在这里采用项目已有序列 baseline 的 64 负例 BCE/Adam 协议；这是可追溯的本地训练设置，不声称是作者未公开的精确配置。其他适配也需与原作者结果区分：当前源数据只有固定的历史—目标样本，没有用户 ID，DiffRec 因而使用每条样本的可见历史向量，不能恢复原版按完整用户交互聚合的训练矩阵。DDSR 在 Amazon 使用现有 OpenAI 文本向量，未重新生成原文的 BERT 特征；解码以全目录距离排名替代只返回单个物品。PreferDiff 使用投影后的固定特征和标准累计 alpha DDIM 更新。PreferGrow 共享本工程的去噪器和采样器。它们可以在同一评估协议下重训和比较，结果不应标为各原仓库原始配置的直接复现。
 
 参考实现与算法来源：
 

@@ -25,7 +25,7 @@ class ParallelTests(unittest.TestCase):
         ids = [row["id"] for row in graph]
         self.assertEqual(len(ids), len(set(ids)))
         experiments = [row for row in graph if row["kind"] == "experiment"]
-        self.assertEqual(len(experiments), 564)
+        self.assertEqual(len(experiments), 468)
         for row in graph:
             self.assertTrue(set(row["dependencies"]).issubset(ids))
         for row in experiments:

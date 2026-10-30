@@ -32,6 +32,25 @@ def right_pad(sequence, lengths):
     return sequence.gather(1, indices)
 
 
+def sampled_binary_cross_entropy(state, item_embeddings, targets, negative_count):
+    item_count = item_embeddings.shape[0]
+    if item_count < 2 or negative_count < 1:
+        raise ValueError("sampled BCE requires at least two items and one negative")
+    negative_ids = torch.randint(item_count - 1, (len(targets), negative_count), device=targets.device)
+    negative_ids += negative_ids >= targets[:, None]
+    positive_logits = (state * item_embeddings[targets]).sum(-1)
+    negative_logits = (state[:, None] * item_embeddings[negative_ids]).sum(-1)
+    positive_loss = F.binary_cross_entropy_with_logits(positive_logits, torch.ones_like(positive_logits))
+    negative_loss = F.binary_cross_entropy_with_logits(negative_logits, torch.zeros_like(negative_logits))
+    return positive_loss + negative_loss
+
+
+def make_baseline_optimizer(model, config):
+    settings = config["training"]
+    optimizer_type = torch.optim.Adam if config["method"] in {"gru4rec", "caser"} else torch.optim.AdamW
+    return optimizer_type(model.parameters(), lr=settings["learning_rate"], weight_decay=0.)
+
+
 class GRU4Rec(nn.Module):
     def __init__(self, n, config):
         super().__init__()
@@ -40,16 +59,21 @@ class GRU4Rec(nn.Module):
         self.items = nn.Embedding(n + 1, d, padding_idx=n)
         self.dropout = nn.Dropout(config["baseline"]["dropout"])
         self.gru = nn.GRU(d, d, batch_first=True)
-        self.output = nn.Linear(d, n)
+        self.negative_count = config["baseline"]["negative_samples"]
 
-    def forward(self, sequence, lengths):
+    def encode(self, sequence, lengths):
         embedded = self.dropout(self.items(right_pad(sequence, lengths)))
         packed = nn.utils.rnn.pack_padded_sequence(embedded, lengths.cpu(), batch_first=True, enforce_sorted=False)
         _, state = self.gru(packed)
-        return self.output(state[-1])
+        return state[-1]
+
+    def forward(self, sequence, lengths):
+        state = self.encode(sequence, lengths)
+        return state @ self.items.weight[:self.n].T
 
     def loss(self, sequence, lengths, target):
-        return F.cross_entropy(self(sequence, lengths), target)
+        return sampled_binary_cross_entropy(self.encode(sequence, lengths), self.items.weight[:self.n],
+                                           target, self.negative_count)
 
 
 class Caser(nn.Module):
@@ -63,17 +87,24 @@ class Caser(nn.Module):
         self.horizontal = nn.ModuleList(nn.Conv2d(1, filters, (h, d)) for h in range(1, length + 1))
         self.dropout = nn.Dropout(config["baseline"]["dropout"])
         self.hidden = nn.Linear(filters * (d + length), d)
-        self.output = nn.Linear(d, n)
+        self.negative_count = config["baseline"]["negative_samples"]
 
-    def forward(self, sequence, lengths):
-        embedded = self.items(sequence).unsqueeze(1)
+    def encode(self, sequence, lengths):
+        sequence = right_pad(sequence, lengths)
+        positions = torch.arange(sequence.shape[1], device=sequence.device)
+        valid = positions[None, :] < lengths[:, None]
+        embedded = (self.items(sequence) * valid[..., None]).unsqueeze(1)
         vertical = self.vertical(embedded).flatten(1)
         horizontal = [F.relu(conv(embedded)).flatten(2).amax(-1) for conv in self.horizontal]
-        hidden = F.relu(self.hidden(self.dropout(torch.cat((vertical, *horizontal), -1))))
-        return self.output(hidden)
+        return F.relu(self.hidden(self.dropout(torch.cat((vertical, *horizontal), -1))))
+
+    def forward(self, sequence, lengths):
+        state = self.encode(sequence, lengths)
+        return state @ self.items.weight[:self.n].T
 
     def loss(self, sequence, lengths, target):
-        return F.cross_entropy(self(sequence, lengths), target)
+        return sampled_binary_cross_entropy(self.encode(sequence, lengths), self.items.weight[:self.n],
+                                           target, self.negative_count)
 
 
 class BERT4Rec(nn.Module):
@@ -348,7 +379,7 @@ def train_baseline(output, config, device):
     seed_all(config["seed"])
     settings = config["training"]
     model = make_baseline(output, config, device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=settings["learning_rate"], weight_decay=0.)
+    optimizer = make_baseline_optimizer(model, config)
     training, validation = load_split(output, "train"), load_split(output, "val")
     batches = loader(training, settings["batch_size"], shuffle=True, seed=config["seed"])
     best, best_epoch, best_seconds = None, 0, 0.

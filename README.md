@@ -45,7 +45,7 @@ bash run.sh --stage all --workers 4 --tf32 --output runs/paper_a100
 
 四个独立训练进程共享 GPU；验证搜索也并行，附录效率计时独占 GPU。总日志在当前终端，各任务日志与进度保存在输出目录的 `parallel/`；重新执行同一命令会跳过完成任务。`--tf32` 开启 Ampere Tensor Core 的 TF32 矩阵乘法，训练批量与早停规则保持不变。
 
-主表包括 SASRec、Caser、GRU4Rec、BERT4Rec、PreferDiff、DiffRec、DDSR、PreferGrow、ChoiceGrow；SASRec 复用第二阶段结果。脚本用验证集选参数，并运行 2×2 消融、候选信息对照、Toys 前向对照，以及附录的初始化交叉、退出率审计与匹配重训、五分区重复、算子效率和 Steam 全测试集单条推理计时。每个正式模型训练完，立即加载验证最佳模型测试，再进入下一任务；调参试验只看验证集。
+主表包括 SASRec、Caser、GRU4Rec、BERT4Rec、PreferDiff、DiffRec、DDSR、PreferGrow、ChoiceGrow；每个单元运行 3 次（seed 100–102），SASRec 复用第二阶段结果。因子消融和前向对照仍按清单使用 6 个训练种子。脚本用验证集选参数，并运行 2×2 消融、候选信息对照、Toys 前向对照，以及附录的初始化交叉、退出率审计与匹配重训、五分区重复、算子效率和 Steam 全测试集单条推理计时。每个正式模型训练完，立即加载验证最佳模型测试，再进入下一任务；调参试验只看验证集。
 
 **训练轮次、损失、验证指标和测试结果实时显示在当前窗口。** 模型、日志和报告保存在 `runs/paper/experiments/<数据集>/<实验>/seed_<种子>/`。`report.json` 是测试结果；`runs/paper/summary/tables.md` 是汇总表，旁边有逐次结果 `runs.csv` 和按表分组的 JSON。效率结果在 `runs/paper/efficiency/`。
 
@@ -53,7 +53,7 @@ bash run.sh --stage all --workers 4 --tf32 --output runs/paper_a100
 
 关闭窗口或任务中断后，重新执行相同命令会复用已完成的任务；中断的单个训练会备份后从头重跑。修改配置后请使用新的 `--output`。所有运行产物在 `runs/` 中，均不上传 Git。
 
-重新跑全套实验时使用新的输出目录，例如将三个命令中的 `runs/paper` 均换为 `runs/paper_all`，以免复用旧结果。实验设置在 `config.json` 和 `paper_suite.json`；默认有 564 个正式任务（含 24 个复用的 SASRec），另有验证搜索和附录评测。各表对应、模型适配和参数说明见 [EXPERIMENTS.md](EXPERIMENTS.md)。
+重新跑全套实验时使用新的输出目录，例如将三个命令中的 `runs/paper` 均换为 `runs/paper_all`，以免复用旧结果。实验设置在 `config.json` 和 `paper_suite.json`；默认有 468 个正式任务（含 24 个复用的 SASRec），另有验证搜索和附录评测。主表种子由 `main_seeds` 设置；其他主实验种子仍由 `seeds` 设置。各表对应、模型适配和参数说明见 [EXPERIMENTS.md](EXPERIMENTS.md)。
 
 只检查流程时，可运行小样本版本（单种子、每个模型一轮，不用于效果结论）：
 

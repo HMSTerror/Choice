@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 import torch
 
-from baselines import Caser, DDSR, DiffRec, GRU4Rec, BERT4Rec, PreferDiff
+from baselines import (Caser, DDSR, DiffRec, GRU4Rec, BERT4Rec, PreferDiff,
+                       make_baseline_optimizer, sampled_binary_cross_entropy)
 from experiments import arm_config, config_for, train_run
 from data import write_json
 
@@ -50,6 +51,46 @@ class BaselineTests(unittest.TestCase):
                     scores = model.eval()(self.sequence, self.lengths)
                 self.assertEqual(scores.shape, (2, 12))
                 self.assertTrue(bool(torch.isfinite(scores).all()))
+
+    def test_gru_and_caser_use_64_uniform_negative_bce(self):
+        for method, constructor in (("gru4rec", GRU4Rec), ("caser", Caser)):
+            with self.subTest(method=method):
+                model = constructor(12, self.config(method))
+                with patch("baselines.torch.randint", return_value=torch.zeros(2, 64, dtype=torch.long)) as draw:
+                    loss = model.loss(self.sequence, self.lengths, self.target)
+                self.assertTrue(bool(torch.isfinite(loss)))
+                draw.assert_called_once_with(11, (2, 64), device=self.target.device)
+
+    def test_gru_and_caser_use_adam(self):
+        for method, constructor in (("gru4rec", GRU4Rec), ("caser", Caser)):
+            config = self.config(method)
+            optimizer = make_baseline_optimizer(constructor(12, config), config)
+            self.assertIsInstance(optimizer, torch.optim.Adam)
+            self.assertNotIsInstance(optimizer, torch.optim.AdamW)
+
+    def test_caser_reorders_left_padded_history_before_convolution(self):
+        model = Caser(12, self.config("caser")).eval()
+        captured = []
+        handle = model.vertical.register_forward_pre_hook(lambda _module, args: captured.append(args[0]))
+        model.encode(self.sequence, self.lengths)
+        handle.remove()
+        expected = model.items(torch.tensor([[1, 2, 12, 12], [3, 4, 5, 12]]))
+        valid = torch.arange(4)[None, :] < self.lengths[:, None]
+        expected = expected * valid[..., None]
+        torch.testing.assert_close(captured[0].squeeze(1), expected)
+
+    def test_sampled_bce_excludes_positive_item_and_matches_pointwise_loss(self):
+        state = torch.tensor([[1., 2.]])
+        item_embeddings = torch.arange(20, dtype=torch.float32).reshape(10, 2)
+        target = torch.tensor([3])
+        with patch("baselines.torch.randint", return_value=torch.tensor([[3, 3]])):
+            actual = sampled_binary_cross_entropy(state, item_embeddings, target, 2)
+        negative_ids = torch.tensor([[4, 4]])
+        positive = (state * item_embeddings[target]).sum(-1)
+        negative = (state[:, None] * item_embeddings[negative_ids]).sum(-1)
+        expected = torch.nn.functional.binary_cross_entropy_with_logits(positive, torch.ones_like(positive))
+        expected += torch.nn.functional.binary_cross_entropy_with_logits(negative, torch.zeros_like(negative))
+        torch.testing.assert_close(actual, expected)
 
     def test_ddsr_skip_posterior_matches_dense_joint_marginalization(self):
         model = DDSR(12, self.config("ddsr"), self.artifact)

@@ -1,6 +1,7 @@
 {
   "datasets": ["Steam", "Beauty", "Toys", "Sports"],
   "seeds": [100, 101, 102, 103, 104, 105],
+  "main_seeds": [100, 101, 102],
   "control_seeds": [100, 101, 102],
   "partition_seeds": [200, 201, 202, 203, 204],
   "groups": ["main", "factorial", "auxiliary", "forward", "matched_exit", "initialization", "partitions", "efficiency"],
@@ -32,6 +33,7 @@
     "settings": {
       "dropout": 0.1,
       "caser_filters": 16,
+      "negative_samples": 64,
       "preferdiff": {"steps": 2000, "sampling_steps": 100, "guidance": 4.0, "gamma": 5.0, "lambda": 0.5},
       "diffrec": {"steps": 5, "width": 1000, "noise_scale": 0.0001, "noise_min": 0.0005, "noise_max": 0.005, "sampling_steps": 0, "reweight": true},
       "ddsr": {"steps": 1000, "skip": 100}

@@ -36,12 +36,15 @@ class ExperimentTests(unittest.TestCase):
 
     def test_full_plan_covers_paper_groups_without_duplicate_training(self):
         plan = jobs(self.suite, self.suite["datasets"], self.suite["seeds"], self.suite["groups"])
-        self.assertEqual(len(plan), 564)
+        self.assertEqual(len(plan), 468)
         keys = {(r["dataset"], r["arm"], r["seed"], r["partition"]) for r in plan}
         self.assertEqual(len(keys), len(plan))
         main = [r for r in plan if "main" in r["groups"]]
         self.assertEqual({r["arm"] for r in main}, set(MAIN))
-        self.assertEqual(len(main), 216)
+        self.assertEqual(len(main), 108)
+        self.assertEqual({r["seed"] for r in main}, set(self.suite["main_seeds"]))
+        factorial = [r for r in plan if "factorial" in r["groups"]]
+        self.assertEqual({r["seed"] for r in factorial}, set(self.suite["seeds"]))
         for row in plan:
             if "forward" in row["groups"]:
                 self.assertEqual(row["dataset"], "Toys")
