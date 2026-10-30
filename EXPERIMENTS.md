@@ -17,11 +17,11 @@
 
 ## 选择规则
 
-`paper_suite.json` 默认对 Steam 搜索 50 组，对 Beauty、Toys、Sports 各搜索 100 组，参数范围为论文的学习率、候选质量、reset、root share、fine share。最高验证 NDCG@10 的前三组分别重训，仍以验证集选择最终配置。搜索只运行验证评估；正式实验随后对每个最佳模型测试，测试不选参数或模型。
+默认关闭 ChoiceGrow 和六种 baseline 的超参数搜索。ChoiceGrow 固定使用用户指定配置：AdamW 恒定学习率 `0.0006167980008189615`、候选质量 `m=0.01`、reset `alpha=0.035`、root share `0.7835`、fine share `0.887`、总预算 `-log(0.1)`。三层预算为 `[0.4421780796256581, 0.056331593007552826, 1.8040754203608345]`，运行时乘 `1-alpha`；reset 速率为 alpha。分区为随机嵌套 `64→1024→全目录`。候选质量在混入邻居前为 1%，旧值 `0.010228021396912973` 对应 1.0228%，本轮采用明确指定的新数值。
 
 分数融合系数和引导负例权重也只按验证集选择。所有已选择的配置保存在 `runs/paper/selected/`。已有验证选定参数可填入 `paper_suite.json` 的 `dataset_overrides`，或用 `--skip-tuning` 使用 `config.json`，但三个阶段需保持设置一致。
 
-传统模型、PreferDiff、DiffRec 分别搜索学习率 `{.0001,.0003,.001}`；DDSR 额外交叉搜索跳步 `{100,50,35,28,23,20,17,15}`。它们分别选择自己的验证最佳配置，不继承 ChoiceGrow 搜索的学习率。SASRec 使用 `config.json` 中固定的参数；PreferGrow 使用清单内按数据集预设的 Hybrid gamma 和学习率。主表模型在 3 个种子上重训；因子消融、前向对照和其他附录任务仍按各自清单使用六种子。调参目录中不生成测试报告。
+其他模型从 `paper_suite.json/baselines/fixed_configs` 读取独立的维度、学习率、批量、目标和优化器；有论文明确参数则优先论文，缺项使用注明来源的官方配置。DDSR 未公开完整逐数据参数且未找到可核实官方仓库，学习率 `1e-4` 和 skip `100` 是论文范围首项的预先固定选择，并非官方默认或原论文最佳。完整来源、版本与冲突见 [配置核查](docs/BASELINE_PAPER_CONFIGS.md)。SASRec 和 PreferGrow 保留既有固定设置。主表模型在 3 个种子上训练，附录按原清单重复；验证集继续用于早停和 checkpoint 选择，正式训练完立即测试。
 
 ## 主表模型实现与数据适配
 
@@ -30,18 +30,18 @@
 | 模型 | 实现 |
 | --- | --- |
 | SASRec | 一层因果 Transformer，ID 嵌入；正例与 64 个采样负例的 logistic 目标。候选只使用历史，排除历史中的物品，不读取目标。 |
-| GRU4Rec | GRU 编码真实长度历史，使用 64 个均匀采样负例的 pointwise BCE 与 Adam；全目录打分用于评测。 |
-| Caser | 水平卷积（高度 1—10）与垂直卷积，各 16 个通道，item embedding 点积打分；使用 64 个均匀采样负例的 pointwise BCE 与 Adam。短历史先从左 padding 转为右 padding，再屏蔽 padding。数据不含用户 ID，因此使用历史表示。 |
-| BERT4Rec | 双向 Transformer；历史与训练目标拼接后，按 20% 比例执行 80/10/10 遮盖预测；测试在历史后追加 MASK，输出全目录分数。 |
-| PreferDiff | 固定文本特征上的目标向量高斯扩散；正/负重建差的偏好目标与正例重建混合（gamma=5，lambda=.5）；历史条件丢弃 .1，guidance=4，2000 步训练、100 步 DDIM 推理。 |
-| DiffRec | **Wang 等的交互向量版本**：训练重建历史与目标组成的二值交互向量；推理仅输入历史向量。MLP、x0 参数化、linear-var 低噪声、SNR 加权 MSE，默认 5 步与确定性逆向均值更新。 |
+| GRU4Rec | 首发 RSC15 TOP1 示例：单层100维、批内负例、tanh 输出、hidden dropout .5，lr .01、batch50、Adagrad（epsilon在平方根内）。三个独立 one-hot 输入门矩阵；按当前独立历史样本训练，不能恢复 session-parallel 状态传递。 |
+| Caser | 最后5项历史、50维，垂直4/水平16通道，独立输出物品矩阵和偏置；3负例 BCE、Adam lr .001、batch100、dropout .5、L2 1e-6。缺用户 ID 与多未来目标，保留历史表示、单目标适配。 |
+| BERT4Rec | 两层双向 Transformer，Beauty/Toys/Sports hidden64、mask .6，Steam hidden256、mask .4；论文文字heads2；hidden dropout分别 .5/.2，attention dropout .2。lr1e-4、batch256、uncorrected BERT Adam、decay .01、clip5、warmup100、40万/80万步线性衰减。保留提供的历史10而非原作者50。 |
+| PreferDiff | Amazon原生3072维固定白化特征和模型，Steam为现有768维；cosine重建偏好目标。论文Table12：Beauty lambda .8/w6、Toys .5/w4、Sports .4/w2；Steam缺原始最佳点，使用默认lambda .5/w4。AdamW lr1e-4、batch256、condition dropout .1、2000步训练、论文20步DDIM。 |
+| DiffRec | **Wang 等的交互向量版本**；使用官方main.py默认AdamW lr1e-4、batch400、MLP[1000]、time10、x0、linear-var、T100、noise scale .1/min .0001/max .02、SNR加权、sampling_steps0和确定性逆向更新。原论文没有当前四数据集的最佳点。 |
 | DDSR | arXiv:2410.23994 的 **OPQ + Uniform** 路径：32 个 256 项码本，余弦累计保留率、1000 步；扰动整个历史的语义码，逐位置预测下一物品的干净语义码并计算交叉熵。推理从历史码开始，用式 (7) 的联合边缘概率归一化后迭代跳步采样，最后按码本质心距离给全目录排序。 |
 | PreferGrow | 官方 HybridWise 的全目录秩一转移与额外 nonpreference 状态；公共 score-entropy 去噪器和采样器。 |
 | ChoiceGrow | 历史条件目的分布、嵌套作用域与全局 reset，精确结构化前向核、score-entropy、incoming-edge 逆向率与自适应 tau-leaping。主模型只增加本项目保留的邻居混合。 |
 
-语义源为仓库已有的物品描述向量：Steam 用 `bert_emb.pickle`（768 维），三个 Amazon 类别用 `3large_emb.pickle`（3072 维）。PreferDiff 用**只在训练出现物品上拟合**的 PCA 白化投影到 256 维；DDSR 在同一训练物品集合上拟合 OPQ，然后给整个目录编码。目录物品描述可用，但验证/测试交互和目标不参与拟合。`semantic.json` 记录来源、维度、训练物品数和量化方式。
+语义源为仓库已有的物品描述向量：Steam 用 `bert_emb.pickle`（768 维），三个 Amazon 类别用 `3large_emb.pickle`（3072 维）。PreferDiff 用**只在训练出现物品上拟合**的完整原生维度白化，不再降到256维；DDSR 在同一训练物品集合上拟合 OPQ，然后给整个目录编码。目录物品描述可用，但验证/测试交互和目标不参与拟合。`semantic.json` 记录来源、维度、训练物品数和量化方式。
 
-论文正文及附录统一规定数据划分和全目录评测，但没有给出这些传统 baseline 的逐模型损失/优化器细节。GRU4Rec 与 Caser 在这里采用项目已有序列 baseline 的 64 负例 BCE/Adam 协议；这是可追溯的本地训练设置，不声称是作者未公开的精确配置。其他适配也需与原作者结果区分：当前源数据只有固定的历史—目标样本，没有用户 ID，DiffRec 因而使用每条样本的可见历史向量，不能恢复原版按完整用户交互聚合的训练矩阵。DDSR 在 Amazon 使用现有 OpenAI 文本向量，未重新生成原文的 BERT 特征；解码以全目录距离排名替代只返回单个物品。PreferDiff 使用投影后的固定特征和标准累计 alpha DDIM 更新。PreferGrow 共享本工程的去噪器和采样器。它们可以在同一评估协议下重训和比较，结果不应标为各原仓库原始配置的直接复现。
+本轮按各模型原论文核对参数，但数据和训练协议仍是统一适配：源数据只有固定历史—单目标样本、没有用户 ID；因此不能恢复 Caser 用户向量、GRU4Rec session-parallel 状态传递或 DiffRec 完整用户交互矩阵。DDSR 的 Amazon 文本来源、全目录解码，PreferDiff 的训练物品白化拟合与历史编码器适配，PreferGrow 的共享去噪器/采样器也仍有区别。本文配置来源与剩余适配已单独记录，不将参数对齐写作原仓库端到端等价复现。
 
 参考实现与算法来源：
 

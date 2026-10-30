@@ -32,7 +32,8 @@ class ParallelTests(unittest.TestCase):
             self.assertIn(f"candidates_{row['dataset']}_{row['seed']}", row["dependencies"])
         for dataset in self.suite["datasets"]:
             selection = next(r for r in graph if r["id"] == f"tune_{dataset}")
-            self.assertEqual(len([d for d in selection["dependencies"] if "_choice_" in d]), self.suite["tuning"]["trials"][dataset])
+            expected_trials = self.suite["tuning"]["trials"][dataset] if self.suite["tuning"]["enabled"] else 0
+            self.assertEqual(len([d for d in selection["dependencies"] if "_choice_" in d]), expected_trials)
         completed = set()
         while len(completed) < len(graph):
             ready = {row["id"] for row in graph if set(row["dependencies"]).issubset(completed)} - completed
@@ -40,6 +41,8 @@ class ParallelTests(unittest.TestCase):
             completed.update(ready)
 
     def test_search_proposals_are_reproducible_and_baseline_search_is_independent(self):
+        self.suite["tuning"]["enabled"] = True
+        self.suite["baselines"]["tuning"] = True
         source = Path("candidates/Toys/seed_100")
         first = choice_search_configs(self.base, self.suite, "Toys", 100, source, False)
         self.assertEqual(first, choice_search_configs(self.base, self.suite, "Toys", 100, source, False))
@@ -47,6 +50,11 @@ class ParallelTests(unittest.TestCase):
         ddsr = baseline_search_configs(Path("runs/paper"), self.base, self.suite, "Toys", "ddsr", source, False, 100)
         self.assertEqual(len(ddsr), 24)
         self.assertEqual({c["baseline"]["ddsr"]["skip"] for c in ddsr}, set(self.suite["baselines"]["ddsr_skips"]))
+
+    def test_fixed_default_graph_has_no_model_search_tasks(self):
+        graph = build_graph(self.suite, self.suite["datasets"], self.suite["seeds"], self.suite["groups"], "all")
+        self.assertFalse(any(row["kind"] in {"choice_trial", "baseline_trial"} for row in graph))
+        self.assertEqual(len(graph), 528)
 
     def test_compact_candidate_ids_are_restored_to_int64_at_model_boundary(self):
         values = {"seq": torch.tensor([[3, 0], [0, 1]]), "length": torch.tensor([1, 2]), "target": torch.tensor([1, 2])}

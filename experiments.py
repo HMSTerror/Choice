@@ -109,6 +109,7 @@ def candidate_stage(root, base, suite, datasets, seeds, device, smoke, prepare_d
 
 def arm_config(config, arm, suite):
     config = deepcopy(config)
+    smoke_width = config["hidden_size"]
     destination, diffusion = config["destination"], config["diffusion"]
     config["experiment"] = arm
     config["method"] = "choicegrow"
@@ -116,7 +117,23 @@ def arm_config(config, arm, suite):
         config["method"] = arm
         config["baseline"] = deepcopy(suite["baselines"]["settings"])
         config["training"]["learning_rate"] = suite["baselines"]["learning_rates"][0]
+        profile = suite["baselines"].get("fixed_configs", {}).get(arm, {})
+        for key, value in profile.items():
+            if key == "datasets":
+                continue
+            if isinstance(value, dict):
+                config[key].update(deepcopy(value))
+            else:
+                config[key] = value
+        for key, value in profile.get("datasets", {}).get(config["dataset"], {}).items():
+            if isinstance(value, dict):
+                config[key].update(deepcopy(value))
+            else:
+                config[key] = value
         if config["smoke"]:
+            config["hidden_size"] = smoke_width
+            config["training"].update(epochs=1, batch_size=8, eval_batch_size=8,
+                       validation_interval=1, validation_streams=1, test_streams=1)
             config["baseline"]["preferdiff"].update(steps=8, sampling_steps=2)
             config["baseline"]["ddsr"].update(steps=4, skip=2)
         return config
@@ -201,7 +218,8 @@ def tune_baseline(root, base, suite, dataset, method, source, device, smoke, see
         else:
             candidates.append((0., trial))
     config = max(candidates, key=lambda row: row[0])[1]
-    write_json(target, {"config": config, "selection_split": "val", "trials": len(candidates),
+    write_json(target, {"config": config, "selection_split": "val" if enabled else "fixed_config",
+                       "trials": len(candidates) if enabled else 0,
                        "test_evaluated_during_search": False})
     return config
 
@@ -271,7 +289,8 @@ def tune_dataset(root, base, suite, dataset, device, smoke, seed=None):
         selected["seed"] = seed
         write_json(root / "tuning" / dataset / "selection.json", {"selection_split": "val", "trial": selected_trial,
                    "trials": trials, "retrained": len(retrained), "test_evaluated_during_search": False})
-    write_json(selected_path, {"selection_split": "val", "config": selected})
+    write_json(selected_path, {"selection_split": "val" if settings["enabled"] and not override else "fixed_config",
+                               "config": selected})
     return selected
 
 

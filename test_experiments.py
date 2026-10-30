@@ -1,6 +1,7 @@
 """Protocol, leakage and mathematical regression tests for the paper workflow."""
 from copy import deepcopy
 import json
+import math
 from pathlib import Path
 import tempfile
 import unittest
@@ -33,6 +34,24 @@ class ExperimentTests(unittest.TestCase):
                          "neighbor_ids": torch.arange(n)[:, None], "neighbor_weights": torch.ones(n, 1)}
         self.history = torch.tensor([[12, 12, 1, 2], [12, 3, 4, 5]])
         self.proposed = torch.tensor([[0, 1, 2], [3, 4, 5]])
+
+    def test_fixed_choice_parameters_match_user_generator_and_candidate_mass(self):
+        config = json.loads((ROOT / "config.json").read_text())
+        rates = config["diffusion"]["level_rates"]
+        total = -math.log(.1)
+        self.assertAlmostEqual(sum(rates), total)
+        self.assertAlmostEqual(rates[2] / total, .7835)
+        self.assertAlmostEqual(rates[0] / (rates[0] + rates[1]), .887)
+        self.assertEqual(config["diffusion"]["reset_rate"], .035)
+        self.assertEqual(config["training"]["learning_rate"], .0006167980008189615)
+        self.assertEqual(config["destination"]["candidate_mass"], .01)
+        self.assertEqual((config["diffusion"]["fine_size"], config["diffusion"]["coarse_size"]), (64, 1024))
+        config["destination"]["neighbor_mix"] = 0.
+        process = ChoiceProcess(self.artifact, config)
+        context = process.context(self.history, self.proposed)
+        torch.testing.assert_close(context.rho.gather(1, self.proposed).sum(-1), torch.full((2,), .01))
+        self.assertAlmostEqual(sum(process.rates), .965 * total)
+        self.assertAlmostEqual(process.reset_rate, .035)
 
     def test_full_plan_covers_paper_groups_without_duplicate_training(self):
         plan = jobs(self.suite, self.suite["datasets"], self.suite["seeds"], self.suite["groups"])

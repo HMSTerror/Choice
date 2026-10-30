@@ -9,9 +9,11 @@ from unittest.mock import patch
 import torch
 
 from baselines import (Caser, DDSR, DiffRec, GRU4Rec, BERT4Rec, PreferDiff,
-                       make_baseline_optimizer, sampled_binary_cross_entropy)
+                       make_baseline_optimizer, sampled_binary_cross_entropy,
+                       baseline_learning_rate, top1_loss, PaperAdagrad, BertAdam)
 from experiments import arm_config, config_for, train_run
 from data import write_json
+from semantic import whiten_features
 
 
 ROOT = Path(__file__).resolve().parent
@@ -52,21 +54,56 @@ class BaselineTests(unittest.TestCase):
                 self.assertEqual(scores.shape, (2, 12))
                 self.assertTrue(bool(torch.isfinite(scores).all()))
 
-    def test_gru_and_caser_use_64_uniform_negative_bce(self):
-        for method, constructor in (("gru4rec", GRU4Rec), ("caser", Caser)):
-            with self.subTest(method=method):
-                model = constructor(12, self.config(method))
-                with patch("baselines.torch.randint", return_value=torch.zeros(2, 64, dtype=torch.long)) as draw:
-                    loss = model.loss(self.sequence, self.lengths, self.target)
-                self.assertTrue(bool(torch.isfinite(loss)))
-                draw.assert_called_once_with(11, (2, 64), device=self.target.device)
+    def test_caser_uses_three_negatives_and_gru_top1_uses_batch_targets(self):
+        model = Caser(12, self.config("caser"))
+        with patch("baselines.torch.randint", return_value=torch.zeros(2, 3, dtype=torch.long)) as draw:
+            loss = model.loss(self.sequence, self.lengths, self.target)
+        self.assertTrue(bool(torch.isfinite(loss)))
+        draw.assert_called_once_with(11, (2, 3), device=self.target.device)
+        model = GRU4Rec(12, self.config("gru4rec"))
+        with patch("baselines.torch.randint") as draw:
+            loss = model.loss(self.sequence, self.lengths, self.target)
+        draw.assert_not_called()
+        self.assertTrue(bool(torch.isfinite(loss)))
+        self.assertLess(top1_loss(torch.tensor([[1., -1.], [-1., 1.]])),
+                        top1_loss(torch.tensor([[-1., 1.], [1., -1.]])))
 
-    def test_gru_and_caser_use_adam(self):
-        for method, constructor in (("gru4rec", GRU4Rec), ("caser", Caser)):
+    def test_original_model_optimizers_and_bert_decay(self):
+        for method, constructor, optimizer_type in (("gru4rec", GRU4Rec, PaperAdagrad),
+                       ("caser", Caser, torch.optim.Adam), ("bert4rec", BERT4Rec, BertAdam)):
             config = self.config(method)
             optimizer = make_baseline_optimizer(constructor(12, config), config)
-            self.assertIsInstance(optimizer, torch.optim.Adam)
-            self.assertNotIsInstance(optimizer, torch.optim.AdamW)
+            self.assertIsInstance(optimizer, optimizer_type)
+        settings = self.config("bert4rec")["training"]
+        self.assertEqual(baseline_learning_rate(settings, 0), 0.)
+        self.assertAlmostEqual(baseline_learning_rate(settings, 50), settings["learning_rate"] / 2)
+        self.assertAlmostEqual(baseline_learning_rate(settings, 200000), settings["learning_rate"] / 2)
+        self.assertEqual(baseline_learning_rate(settings, 400000), 0.)
+
+    def test_fixed_model_profiles_do_not_inherit_choice_width_or_lr(self):
+        for method, width, lr, batch in (("caser", 50, .001, 100), ("gru4rec", 100, .01, 50),
+                  ("bert4rec", 64, .0001, 256), ("preferdiff", 3072, .0001, 256),
+                  ("diffrec", 8, .0001, 400), ("ddsr", 8, .0001, 2048)):
+            config = arm_config(config_for(self.base, "Toys", 100, False), method, self.suite)
+            self.assertEqual(config["hidden_size"], width)
+            self.assertEqual(config["training"]["learning_rate"], lr)
+            self.assertEqual(config["training"]["batch_size"], batch)
+        beauty = arm_config(config_for(self.base, "Beauty", 100), "preferdiff", self.suite)
+        self.assertEqual(beauty["baseline"]["preferdiff"]["guidance"], 6.)
+        self.assertEqual(beauty["baseline"]["preferdiff"]["lambda"], .8)
+
+    def test_paper_optimizer_updates_use_author_epsilon_and_moment_conventions(self):
+        parameter = torch.nn.Parameter(torch.tensor([1.]))
+        parameter.grad = torch.tensor([2.])
+        optimizer = PaperAdagrad([parameter], lr=.1, eps=1.)
+        optimizer.step()
+        torch.testing.assert_close(parameter, torch.tensor([1 - .2 / 5 ** .5]))
+        parameter = torch.nn.Parameter(torch.tensor([1.]))
+        parameter.grad = torch.tensor([2.])
+        optimizer = BertAdam([{"params": [parameter], "weight_decay": .01}], lr=.1, eps=1e-6)
+        optimizer.step()
+        expected = 1 - .1 * (.2 / (.004 ** .5 + 1e-6) + .01)
+        torch.testing.assert_close(parameter, torch.tensor([expected]))
 
     def test_caser_reorders_left_padded_history_before_convolution(self):
         model = Caser(12, self.config("caser")).eval()
@@ -125,6 +162,18 @@ class BaselineTests(unittest.TestCase):
         self.assertFalse(model.history.items.weight.requires_grad)
         self.assertIsNone(model.history.items.weight.grad)
         self.assertIsNotNone(model.denoise.weight.grad)
+
+    def test_native_whitening_preserves_width_and_fits_training_items_only(self):
+        torch.manual_seed(41)
+        features = torch.randn(12, 6)
+        seen = torch.arange(9)
+        whitened = whiten_features(features, seen)
+        changed = features.clone()
+        changed[9:] += 1000
+        torch.testing.assert_close(whitened[seen], whiten_features(changed, seen)[seen])
+        self.assertEqual(whitened.shape, features.shape)
+        torch.testing.assert_close(whitened[seen].mean(0), torch.zeros(6), atol=1e-5, rtol=0)
+        torch.testing.assert_close(whitened[seen].T @ whitened[seen] / 8, torch.eye(6), atol=1e-5, rtol=1e-5)
 
     def test_baseline_search_does_not_test_and_formal_fit_tests_once_after_training(self):
         with tempfile.TemporaryDirectory() as temp:

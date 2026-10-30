@@ -11,6 +11,21 @@ import tempfile
 import time
 
 
+def whiten_features(features, seen, width=None):
+    """Fit on training items; preserve all source dimensions outside smoke runs."""
+    import torch
+    fit = features[seen]
+    mean = fit.mean(0)
+    if width is not None:
+        rank = min(width, len(fit) - 1, fit.shape[1])
+        _, singular, vectors = torch.pca_lowrank(fit - mean, q=rank, center=False, niter=4)
+        scale = (len(fit) - 1) ** .5 / singular.clamp_min(1e-5)
+        return torch.nn.functional.pad((features - mean) @ vectors * scale, (0, width - rank))
+    covariance = (fit - mean).T @ (fit - mean) / (len(fit) - 1)
+    eigenvalues, vectors = torch.linalg.eigh(covariance)
+    return (features - mean) @ vectors * eigenvalues.clamp_min(1e-6).rsqrt()
+
+
 def semantic_preprocessing(source_root, output, config, settings):
     import numpy as np
     import pandas as pd
@@ -30,16 +45,10 @@ def semantic_preprocessing(source_root, output, config, settings):
     training = load_split(output, "train")
     seen = torch.unique(torch.cat((training["seq"].flatten(), training["target"])))
     seen = seen[seen < n]
-    fit = features[seen]
-    # PreferDiff's fixed embeddings: training-only PCA whitening to common width.
+    # Preserve native semantic width for the PreferDiff paper's fixed features.
     torch.manual_seed(config["seed"])
-    mean = fit.mean(0)
-    width = config["hidden_size"]
-    rank = min(width, len(fit) - 1, fit.shape[1])
-    _, singular, vectors = torch.pca_lowrank(fit - mean, q=rank, center=False, niter=4)
-    scale = (len(fit) - 1) ** .5 / singular.clamp_min(1e-5)
-    projected = (features - mean) @ vectors * scale
-    projected = torch.nn.functional.pad(projected, (0, width - rank))
+    width = config["hidden_size"] if config["smoke"] else features.shape[1]
+    projected = whiten_features(features, seen, width if config["smoke"] else None)
     m, k = (2, 16) if config["smoke"] else (settings["codebooks"], settings["codebook_size"])
     if features.shape[1] % m or k != 256 and not config["smoke"]:
         raise ValueError("DDSR OPQ requires divisible feature width and 256-entry codebooks")
@@ -78,7 +87,8 @@ def semantic_preprocessing(source_root, output, config, settings):
     write_json(output / "semantic.json", {"embedding_file": str(directory / filename),
                "items": n, "native_width": features.shape[1], "preferdiff_width": width,
                "codebooks": m, "codebook_size": k, "fit_split": "train",
-               "fit_items": len(seen), "quantization": "PQ-smoke" if config["smoke"] else "OPQ",
+               "fit_items": len(seen), "preferdiff_whitening": "PCA-smoke" if config["smoke"] else "full-native-width",
+               "quantization": "PQ-smoke" if config["smoke"] else "OPQ",
                "elapsed_seconds": time.perf_counter() - started})
 
 

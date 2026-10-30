@@ -17,7 +17,7 @@ class SASRec(nn.Module):
         with torch.no_grad():
             self.items.weight[item_count].zero_()
         self.positions = nn.Embedding(length, width)
-        layer = nn.TransformerEncoderLayer(width, settings["heads"], width * 4,
+        layer = nn.TransformerEncoderLayer(width, settings["heads"], settings.get("intermediate_size", width * 4),
                     settings["dropout"], activation="gelu", batch_first=True, norm_first=True)
         self.encoder = nn.TransformerEncoder(layer, settings["layers"], enable_nested_tensor=False)
         self.norm = nn.LayerNorm(width)
