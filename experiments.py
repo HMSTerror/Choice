@@ -19,6 +19,7 @@ from diffusion import ChoiceProcess
 from experiment_artifacts import build_controls, scope_artifact
 from models import SASRec
 from baselines import BASELINES, test_baseline, train_baseline
+from checkpoint_policy import cleanup_completed, efficiency_pending, prune_run
 from semantic import semantic_preprocessing
 from train import (better, build_artifacts, candidate_file, evaluate_diffusion,
                    final_evaluation, load_process, make_denoiser, train_diffusion, train_proposer)
@@ -87,12 +88,13 @@ def candidate_stage(root, base, suite, datasets, seeds, device, smoke, prepare_d
             write_json(output / "data_source.json", {"path": str(root / "data" / dataset)})
             if not (output / "sasrec_complete.json").exists():
                 if (output / "sasrec_best.pt").exists():
-                    # Restart only this interrupted SASRec fit, keeping a backup.
+                    # Keep interrupted logs, but do not accumulate model snapshots.
                     backup = output / ("interrupted_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
                     backup.mkdir()
-                    for name in ("sasrec_best.pt", "sasrec_log.jsonl", "sasrec_training.json"):
+                    for name in ("sasrec_log.jsonl", "sasrec_training.json"):
                         if (output / name).exists():
                             shutil.move(str(output / name), str(backup / name))
+                    (output / "sasrec_best.pt").unlink()
                 print(f"[SASRec] {dataset} seed={seed}", flush=True)
                 train_proposer(output, config, device)
                 write_json(output / "sasrec_complete.json", {"complete": True})
@@ -103,8 +105,8 @@ def candidate_stage(root, base, suite, datasets, seeds, device, smoke, prepare_d
                 print(f"[candidates] {dataset} seed={seed}", flush=True)
                 build_artifacts(output, config, device)
                 build_controls(output, config)
-            state = torch.load(output / "sasrec_best.pt", weights_only=True, map_location="cpu")
-            print(f"[candidates ready] {output} proposer_epoch={state['epoch']}", flush=True)
+            training = json.loads((output / "sasrec_training.json").read_text(encoding="utf-8"))
+            print(f"[candidates ready] {output} proposer_epoch={training['best_epoch']}", flush=True)
 
 
 def arm_config(config, arm, suite):
@@ -180,27 +182,41 @@ def train_run(directory, source, config, device, test=True):
     write_json(directory / "data_source.json", {"path": str(source)})
     complete = directory / "training.json"
     baseline = config.get("method") in BASELINES
-    if not complete.exists():
+    state = None
+    # No persistent weights for ordinary baselines: recover an interrupted immediate test by refitting.
+    missing_test_weights = (baseline and config.get("method") != "sasrec" and test
+                            and not (directory / "report.json").exists()
+                            and not (directory / "baseline_best.pt").exists())
+    if not complete.exists() or missing_test_weights:
         checkpoint = "baseline_best.pt" if baseline else "choice_best.pt"
         if config.get("method") == "sasrec":
             shutil.copyfile(source / "sasrec_training.json", complete)
-        elif (directory / checkpoint).exists():
+        elif any((directory / name).exists() for name in
+                 (checkpoint, "choice_newst.pt", "baseline_log.jsonl" if baseline else "choice_log.jsonl")):
             backup = directory / ("interrupted_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
             backup.mkdir()
-            for name in (checkpoint, "baseline_log.jsonl" if baseline else "choice_log.jsonl"):
+            for name in ("baseline_log.jsonl" if baseline else "choice_log.jsonl",):
                 if (directory / name).exists():
                     shutil.move(str(directory / name), str(backup / name))
-        if not complete.exists():
+            for name in (checkpoint, "choice_newst.pt"):
+                (directory / name).unlink(missing_ok=True)
+        if not complete.exists() or missing_test_weights:
             print(f"[train] {directory}", flush=True)
-            (train_baseline if baseline else train_diffusion)(directory, config, device)
+            state = (train_baseline if baseline else train_diffusion)(directory, config, device)
     if test:
         if not (directory / "report.json").exists():
             print(f"[test immediately] {directory}", flush=True)
             if config.get("method") == "sasrec" and (source / "report.json").exists():
                 shutil.copyfile(source / "report.json", directory / "report.json")
             else:
-                (test_baseline if baseline else final_evaluation)(directory, config, device)
+                if baseline and state is not None:
+                    test_baseline(directory, config, device, checkpoint=state)
+                else:
+                    (test_baseline if baseline else final_evaluation)(directory, config, device)
+        if baseline:
+            prune_run(directory, config)
         return json.loads((directory / "report.json").read_text(encoding="utf-8"))
+    prune_run(directory, {**config, "method": "selection_trial"})
     return json.loads(complete.read_text(encoding="utf-8"))
 
 
@@ -594,6 +610,9 @@ def experiment_stage(root, base, suite, datasets, seeds, groups, device, smoke, 
                 write_json(audit, mean_hazard(source, config, device, "test", diagnostics=True))
         if ("partitions" in groups or "forward" in groups) and arm in {"choicegrow", "real_scope", "shuffle_partition", "real_partition"}:
             scope_diagnostics(directory, config, device)
+        write_json(directory / "evaluation_complete.json", {"complete": True})
+        prune_run(directory, config, efficiency_pending(root, suite, groups, dataset, arm, seed))
+        cleanup_completed(root, suite, groups)
         if finalize:
             summary(root)
     if finalize and "efficiency" in groups:
@@ -601,6 +620,7 @@ def experiment_stage(root, base, suite, datasets, seeds, groups, device, smoke, 
         run_benchmarks(root, suite, device, smoke)
     if finalize:
         summary(root)
+        cleanup_completed(root, suite, groups, finished=True)
 
 
 def main(argv=None):

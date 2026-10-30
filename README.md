@@ -25,7 +25,7 @@ bash run.sh --stage candidates --output runs/paper
 
 依次训练四个数据集、六个种子（100—105）的 SASRec，测试其验证集最佳模型，再生成训练、验证和测试集的 top-100 候选及对照候选。每组保存在 `runs/paper/candidates/<数据集>/seed_<种子>/`：
 
-- `sasrec_best.pt`、`sasrec_log.jsonl`、`report.json`：最佳 SASRec、每轮记录和测试结果。
+- `sasrec_log.jsonl`、`report.json`：每轮记录和测试结果；`sasrec_best.pt` 临时供后续融合、在线推理计时使用，全实验结束自动删除。
 - `candidates.pt`：原候选集；`candidates_popularity.pt`、`candidates_swap.pt`：对照候选集。
 - `structure.pt`、`artifacts.json`：邻居、分区和结构说明。
 
@@ -49,9 +49,11 @@ bash run.sh --stage all --workers 4 --tf32 --output runs/paper_a100
 
 **训练轮次、损失、验证指标和测试结果实时显示在当前窗口。** 模型、日志和报告保存在 `runs/paper/experiments/<数据集>/<实验>/seed_<种子>/`。`report.json` 是测试结果；`runs/paper/summary/tables.md` 是汇总表，旁边有逐次结果 `runs.csv` 和按表分组的 JSON。效率结果在 `runs/paper/efficiency/`。
 
+ChoiceGrow（含其消融）每个训练目录只保留 `choice_best.pt`（验证最佳）和 `choice_newst.pt`（最新一轮），均为 EMA 推理权重，每次覆盖更新。其他六个 baseline 在内存中保留验证最佳权重，训练后立即测试，不写 checkpoint；SASRec、PreferGrow 因附录依赖临时保留权重，相关评测完成后自动删除。日志、指标和候选集保留。中断后仍从头训练单个未完成任务；这两份权重不含优化器状态。
+
 两个训练阶段默认均无总轮数上限，使用验证集早停；扩散模型正式测试使用三个固定采样流的均值。ChoiceGrow 开启固定候选质量门、保留新增邻居，主模型无辅助项；`guided_negatives` 是单独的论文对照实验。
 
-关闭窗口或任务中断后，重新执行相同命令会复用已完成的任务；中断的单个训练会备份后从头重跑。修改配置后请使用新的 `--output`。所有运行产物在 `runs/` 中，均不上传 Git。
+关闭窗口或任务中断后，重新执行相同命令会复用已完成的任务；中断的单个训练备份日志后从头重跑，不累积旧权重。修改配置后请使用新的 `--output`。所有运行产物在 `runs/` 中，均不上传 Git。
 
 重新跑全套实验时使用新的输出目录，例如将三个命令中的 `runs/paper` 均换为 `runs/paper_all`，以免复用旧结果。实验设置在 `config.json` 和 `paper_suite.json`；默认有 468 个正式任务（含 12 个复用的主表 SASRec），并行全流程共 528 个任务，另有附录评测。主表种子由 `main_seeds` 设置；其他主实验种子仍由 `seeds` 设置。来源及不能由当前数据恢复的原论文协议差异见 [配置核查](docs/BASELINE_PAPER_CONFIGS.md)，各表对应见 [EXPERIMENTS.md](EXPERIMENTS.md)。
 

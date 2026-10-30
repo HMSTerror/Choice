@@ -270,6 +270,10 @@ def train_diffusion(output, config, device):
                 torch.save({"model": ema.model.state_dict(), "epoch": epoch, "validation": metrics,
                             "config": config, "objective": objective, "ema_updates": ema.updates},
                            checkpoint)
+        if config.get("method", "choicegrow") == "choicegrow":
+            torch.save({"model": ema.model.state_dict(), "epoch": epoch, "validation": metrics,
+                        "config": config, "objective": objective, "ema_updates": ema.updates},
+                       Path(output) / "choice_newst.pt")
         append_log(Path(output) / "choice_log.jsonl", {"stage": "choice", "epoch": epoch,
                    "score_entropy": total / examples, "validation": metrics, "best_epoch": best_epoch})
         if metrics is not None and epoch - best_epoch >= settings["patience"]:

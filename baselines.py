@@ -523,7 +523,7 @@ def train_baseline(output, config, device):
     optimizer = make_baseline_optimizer(model, config)
     training, validation = load_split(output, "train"), load_split(output, "val")
     batches = loader(training, settings["batch_size"], shuffle=True, seed=config["seed"])
-    best, best_epoch, best_seconds = None, 0, 0.
+    best, best_epoch, best_seconds, best_state = None, 0, 0., None
     started = time.perf_counter()
     step = 0
     for epoch in training_epochs(settings["epochs"]):
@@ -548,7 +548,10 @@ def train_baseline(output, config, device):
             metrics = evaluate_baseline(model, validation, config, device, "val", settings["validation_streams"])
             if better(metrics, best):
                 best, best_epoch, best_seconds = metrics, epoch, time.perf_counter() - started
-                torch.save({"model": model.state_dict(), "epoch": epoch, "validation": metrics}, output / "baseline_best.pt")
+                # Keep the validation winner on CPU for the immediate test, without a model file.
+                best_state = {"model": {key: value.detach().cpu().clone()
+                                        for key, value in model.state_dict().items()},
+                              "epoch": epoch, "validation": metrics}
         append_log(output / "baseline_log.jsonl", {"stage": config["method"], "epoch": epoch,
                    "loss": total / examples, "validation": metrics, "best_epoch": best_epoch})
         if metrics is not None and epoch - best_epoch >= settings["patience"]:
@@ -557,9 +560,10 @@ def train_baseline(output, config, device):
                "best_validation": best, "selection_split": "val", "objective": config["method"],
                "epoch_limit": settings["epochs"] or None, "selected_checkpoint_seconds": best_seconds,
                "elapsed_seconds": time.perf_counter() - started})
+    return best_state
 
 
-def test_baseline(output, config, device):
+def test_baseline(output, config, device, checkpoint=None):
     output = Path(output)
     if config["method"] == "sasrec":
         model = SASRec(metadata(output)["item_count"], config).to(device)
@@ -569,7 +573,9 @@ def test_baseline(output, config, device):
         result = {**metrics, "examples": len(load_split(output, "test")["target"]), "streams": 1, "per_stream": [metrics]}
     else:
         model = make_baseline(output, config, device)
-        checkpoint = torch.load(output / "baseline_best.pt", weights_only=True, map_location=device)
+        if checkpoint is None:
+            # Compatibility with fits already running when the retention policy changed.
+            checkpoint = torch.load(output / "baseline_best.pt", weights_only=True, map_location=device)
         model.load_state_dict(checkpoint["model"])
         result = evaluate_baseline(model, load_split(output, "test"), config, device, "test", config["training"]["test_streams"])
     report = {"dataset": config["dataset"], "method": config["method"], "seed": config["seed"],

@@ -102,6 +102,8 @@ def execute_task(root, spec, item):
                              source_dir, tune_baseline, tune_dataset)
     device = configure_runtime(spec)
     base, suite, seeds, smoke = spec["base"], spec["suite"], spec["seeds"], spec["smoke"]
+    from checkpoint_policy import cleanup_completed
+    cleanup_completed(root, suite, spec["groups"])
     dataset, kind = item["dataset"], item["kind"]
     print(f"[worker start] {stamp()} {item['id']} device={device}", flush=True)
     if kind == "prepare":
@@ -198,6 +200,8 @@ def parallel_workflow(root, base, suite, datasets, seeds, groups, device, smoke,
                     print(f"[complete {len(completed)}/{len(graph)}] {identifier}", flush=True)
                     if item["kind"] == "experiment":
                         summary(root)
+                        from checkpoint_policy import cleanup_completed
+                        cleanup_completed(root, suite, groups)
                 else:
                     log = (directory / (identifier + ".log")).read_text(errors="replace")
                     if "out of memory" in log.lower() and attempts[identifier] < 3 and capacity > 1:
@@ -257,6 +261,9 @@ def parallel_workflow(root, base, suite, datasets, seeds, groups, device, smoke,
             print("[efficiency] exclusive GPU after all training tasks", flush=True)
             run_benchmarks(root, suite, benchmark_device, smoke)
             summary(root)
+        if stage in {"all", "experiments"}:
+            from checkpoint_policy import cleanup_completed
+            cleanup_completed(root, suite, groups, finished=True)
         write_json(directory / "status.json", {"updated_at": stamp(), "state": "complete",
                    "total": len(graph), "completed": len(completed), "failed": {}, "running": {}, "pending": 0})
 

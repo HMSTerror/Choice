@@ -9,6 +9,7 @@ import torch
 from torch import nn
 
 from train import better, train_diffusion, train_proposer
+from experiments import train_run
 
 
 class TinyProposer(nn.Module):
@@ -31,6 +32,11 @@ class TinyProcess:
 
     def loss(self, model, sequence, target, proposed):
         return model.weight.square().mean()
+
+
+class TinyBaseline(TinyDenoiser):
+    def loss(self, sequence, lengths, target):
+        return self.weight.square().mean()
 
 
 def metrics(value):
@@ -85,6 +91,38 @@ class EarlyStoppingTests(unittest.TestCase):
             self.assertIsNone(report["epoch_limit"])
             self.assertEqual(report["stop_reason"], "early_stopping")
             self.assertEqual(best["epoch"], 4)
+            latest = torch.load(directory / "choice_newst.pt", weights_only=True)
+            self.assertEqual(latest["epoch"], 8)
+            self.assertEqual(sorted(path.name for path in directory.glob("choice_*.pt")),
+                             ["choice_best.pt", "choice_newst.pt"])
+            self.assertFalse(torch.equal(best["model"]["weight"], latest["model"]["weight"]))
+
+    def test_baseline_tests_best_in_memory_and_recovers_a_test_interruption_without_weights(self):
+        self.config.update(method="caser")
+        self.config["training"].update(epochs=3, patience=4, validation_interval=1, batch_size=2)
+        selected = []
+        def evaluate(current, values, config, device, split, streams):
+            if split == "val":
+                selected.append(current.weight.detach().clone())
+                return metrics([.3, .2, .1][(len(selected) - 1) % 3])
+            torch.testing.assert_close(current.weight, selected[-3])
+            return metrics(.25)
+        with tempfile.TemporaryDirectory() as temp, \
+             patch("baselines.make_baseline", side_effect=lambda *_: TinyBaseline(6, self.config)), \
+             patch("baselines.load_split", return_value=self.values), \
+             patch("baselines.evaluate_baseline", side_effect=evaluate), \
+             patch("baselines.append_log"):
+            directory = Path(temp)
+            # A previous process finished training but died before testing its in-memory best.
+            (directory / "training.json").write_text('{"best_epoch": 1}')
+            train_run(directory, directory / "source", self.config, self.device)
+            report = json.loads((directory / "report.json").read_text())
+            self.assertEqual(report["best_epoch"], 1)
+            self.assertEqual(report["test"]["ndcg@10"], .25)
+            self.assertEqual(list(directory.glob("*.pt")), [])
+            self.assertEqual(len(selected), 3)
+            train_run(directory, directory / "source", self.config, self.device)
+            self.assertEqual(len(selected), 3)
 
 
 if __name__ == "__main__":

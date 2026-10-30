@@ -11,6 +11,7 @@ from data import load_split, metadata, write_json
 from diffusion import ChoiceProcess, random_partition
 from train import candidate_file, evaluation_rng, load_process, make_denoiser
 from models import SASRec
+from checkpoint_policy import cleanup_completed
 
 
 def synchronize(device):
@@ -223,3 +224,4 @@ def run_benchmarks(root, suite, device, smoke):
                 rows.append(json.loads(target.read_text(encoding="utf-8")))
     write_json(output / "end_to_end.json", {**config, "runs": rows})
     write_json(root / "summary" / "partition_reml.json", partition_statistics(root))
+    cleanup_completed(root, suite, suite["groups"], finished=True)
