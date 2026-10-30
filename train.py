@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from copy import deepcopy
 from itertools import count
+import hashlib
 import json
 from pathlib import Path
 import time
@@ -10,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from data import SPLITS, loader, load_split, metadata, write_json
+from data import SPLITS, loader, load_split, metadata, prepared_root, write_json
 from diffusion import ChoiceProcess, random_partition
 from models import Denoiser, SASRec
 from neighbors import build_neighbors
@@ -48,8 +49,7 @@ def ranking_totals(scores, target):
 
 
 def better(metrics, previous):
-    return previous is None or (metrics["ndcg@10"], metrics["hr@10"]) > (
-        previous["ndcg@10"], previous["hr@10"])
+    return previous is None or metrics["ndcg@10"] > previous["ndcg@10"]
 
 
 @torch.no_grad()
@@ -64,6 +64,7 @@ def evaluate_proposer(model, values, batch_size, device):
 
 
 def train_proposer(output, config, device):
+    started = time.perf_counter()
     seed_all(config["seed"])
     n = metadata(output)["item_count"]
     settings = config["sasrec"]
@@ -74,7 +75,7 @@ def train_proposer(output, config, device):
     checkpoint = Path(output) / "sasrec_best.pt"
     if checkpoint.exists():
         raise FileExistsError(f"Proposer already exists: {checkpoint}; choose a new output")
-    best, best_epoch = None, 0
+    best, best_epoch, best_seconds = None, 0, 0.
     for epoch in training_epochs(settings["epochs"]):
         model.train()
         total, examples = 0., 0
@@ -97,12 +98,19 @@ def train_proposer(output, config, device):
         metrics = evaluate_proposer(model, validation, settings["batch_size"], device)
         if better(metrics, best):
             best, best_epoch = metrics, epoch
+            best_seconds = time.perf_counter() - started
             torch.save({"model": model.state_dict(), "epoch": epoch, "validation": metrics,
                         "config": config}, checkpoint)
         append_log(Path(output) / "sasrec_log.jsonl", {"stage": "sasrec", "epoch": epoch,
                    "loss": total / examples, "validation": metrics, "best_epoch": best_epoch})
         if epoch - best_epoch >= settings["patience"]:
             break
+    write_json(Path(output) / "sasrec_training.json", {"epochs_completed": epoch,
+               "best_epoch": best_epoch, "best_validation": best, "selection_split": "val",
+               "epoch_limit": settings["epochs"] or None,
+               "stop_reason": "early_stopping" if epoch - best_epoch >= settings["patience"] else "epoch_limit",
+               "selected_checkpoint_seconds": best_seconds,
+               "elapsed_seconds": time.perf_counter() - started})
 
 
 @torch.no_grad()
@@ -133,7 +141,7 @@ def build_artifacts(output, config, device):
     destination = config["destination"]
     ids, weights = build_neighbors(training["seq"], training["target"], n,
                 destination["neighbor_count"], destination["neighbor_lags"], destination["neighbor_self_prior"])
-    counts = torch.from_numpy(np.load(Path(output) / "prepared" / "train_target_counts.npy")).float()
+    counts = torch.from_numpy(np.load(prepared_root(output) / "prepared" / "train_target_counts.npy")).float()
     base = (counts + 1).sqrt()
     settings = config["diffusion"]
     artifact = {"base": base / base.sum(), "neighbor_ids": ids, "neighbor_weights": weights,
@@ -153,20 +161,35 @@ def build_artifacts(output, config, device):
 
 
 def load_process(output, config, device):
-    artifact = torch.load(Path(output) / "structure.pt", map_location="cpu", weights_only=True)
+    artifact = torch.load(config.get("structure_file", Path(output) / "structure.pt"), map_location="cpu", weights_only=True)
+    if config.get("method") == "prefergrow":
+        from prefergrow import PreferGrowProcess
+        return PreferGrowProcess(artifact, config).to(device)
     return ChoiceProcess(artifact, config).to(device)
+
+
+def candidate_file(output, config):
+    return config.get("candidate_file", Path(output) / "candidates.pt")
+
+
+def make_denoiser(output, config, process):
+    from copy import deepcopy
+    settings = deepcopy(config)
+    settings["catalog_count"] = metadata(output)["item_count"]
+    return Denoiser(process.item_count, settings)
 
 
 @contextmanager
 def evaluation_rng(seed, split, stream, device):
     devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
     with torch.random.fork_rng(devices=devices):
-        torch.manual_seed(int(seed) + {"val": 1000003, "test": 2000003}[split] + 1009 * stream)
+        payload = f"{seed}:{split}:{stream}".encode("utf-8")
+        torch.manual_seed(int.from_bytes(hashlib.sha256(payload).digest()[:8], "big") % (2**31 - 1))
         yield
 
 
 @torch.no_grad()
-def evaluate_diffusion(model, process, values, candidates, config, device, split, streams):
+def evaluate_diffusion(model, process, values, candidates, config, device, split, streams, score_transform=None):
     model.eval()
     results = []
     for stream in range(streams):
@@ -178,6 +201,9 @@ def evaluate_diffusion(model, process, values, candidates, config, device, split
                                                          config["training"]["guidance_strength"])
                 if scores.shape[1] != process.item_count or not torch.isfinite(scores).all():
                     raise FloatingPointError("Expected finite full-catalog ranking scores")
+                scores = scores[:, :model.catalog_count]
+                if score_transform is not None:
+                    scores = score_transform(scores, sequence.to(device))
                 for key, value in ranking_totals(scores, target.to(device)).items():
                     totals[key] = totals.get(key, 0.) + value
                 substeps += telemetry["mean_reverse_substeps"] * len(target)
@@ -207,17 +233,19 @@ def train_diffusion(output, config, device):
     seed_all(config["seed"])
     settings = config["training"]
     process = load_process(output, config, device)
-    model = Denoiser(process.item_count, config).to(device)
+    model = make_denoiser(output, config, process).to(device)
     ema = EMA(model, settings["ema_decay"])
     optimizer = torch.optim.AdamW(model.parameters(), lr=settings["learning_rate"], weight_decay=0.)
-    candidates = torch.load(Path(output) / "candidates.pt", map_location="cpu", weights_only=True)
+    candidates = torch.load(candidate_file(output, config), map_location="cpu", weights_only=True)
     training, validation = load_split(output, "train"), load_split(output, "val")
     batches = loader(training, settings["batch_size"], shuffle=True, seed=config["seed"],
                      candidates=candidates["train"])
     checkpoint = Path(output) / "choice_best.pt"
     if checkpoint.exists():
         raise FileExistsError(f"Diffusion checkpoint already exists: {checkpoint}; choose a new output")
-    best, best_epoch, started = None, 0, time.perf_counter()
+    best, best_epoch, best_seconds, started = None, 0, 0., time.perf_counter()
+    objective = ("score_entropy+guided_pairwise" if config["diffusion"].get("guided_negative_weight", 0.)
+                 else "score_entropy")
     for epoch in training_epochs(settings["epochs"]):
         model.train()
         total, examples = 0., 0
@@ -238,26 +266,28 @@ def train_diffusion(output, config, device):
                                          device, "val", settings["validation_streams"])
             if better(metrics, best):
                 best, best_epoch = metrics, epoch
+                best_seconds = time.perf_counter() - started
                 torch.save({"model": ema.model.state_dict(), "epoch": epoch, "validation": metrics,
-                            "config": config, "objective": "score_entropy", "ema_updates": ema.updates},
+                            "config": config, "objective": objective, "ema_updates": ema.updates},
                            checkpoint)
         append_log(Path(output) / "choice_log.jsonl", {"stage": "choice", "epoch": epoch,
                    "score_entropy": total / examples, "validation": metrics, "best_epoch": best_epoch})
         if metrics is not None and epoch - best_epoch >= settings["patience"]:
             break
     write_json(Path(output) / "training.json", {"epochs_completed": epoch, "best_epoch": best_epoch,
-               "best_validation": best, "selection_split": "val", "objective": "score_entropy",
+               "best_validation": best, "selection_split": "val", "objective": objective,
                "epoch_limit": settings["epochs"] or None,
                "stop_reason": "early_stopping" if epoch - best_epoch >= settings["patience"] else "epoch_limit",
+               "selected_checkpoint_seconds": best_seconds,
                "elapsed_seconds": time.perf_counter() - started})
 
 
 def final_evaluation(output, config, device):
     process = load_process(output, config, device)
     state = torch.load(Path(output) / "choice_best.pt", map_location=device, weights_only=True)
-    model = Denoiser(process.item_count, config).to(device)
+    model = make_denoiser(output, config, process).to(device)
     model.load_state_dict(state["model"])
-    candidates = torch.load(Path(output) / "candidates.pt", map_location="cpu", weights_only=True)
+    candidates = torch.load(candidate_file(output, config), map_location="cpu", weights_only=True)
     result = evaluate_diffusion(model, process, load_split(output, "test"), candidates["test"], config,
                                 device, "test", config["training"]["test_streams"])
     report = {"dataset": config["dataset"], "seed": config["seed"], "smoke": config["smoke"],

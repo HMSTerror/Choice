@@ -1,72 +1,56 @@
 # Choice
 
-以下在 Windows PowerShell 中操作，以 Toys 数据集为例。
+Linux 下按以下三个阶段运行。默认覆盖 Steam、Beauty、Toys、Sports，主表九种模型，以及正文和技术附录中的实验。
 
-## 0. 下载与配置环境
+## 一阶段：下载、配置环境和数据预处理
 
-安装 Python 3.11、Git 和 Git LFS，然后执行：
+先安装 Python 3.10—3.12、Git、Git LFS 和 C++ 编译器（Ubuntu：`sudo apt-get install python3-venv git git-lfs build-essential`），然后执行：
 
-```powershell
+```bash
 git lfs install
 git clone https://github.com/HMSTerror/Choice.git
 cd Choice
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+git lfs pull
+bash setup.sh
+bash run.sh --stage prepare --output runs/paper
 ```
 
-以上安装 CUDA 12.4 版 PyTorch。仅使用 CPU 时，跳过安装 PyTorch 的单独命令，直接安装 `requirements.txt`。
+`setup.sh` 创建 `.venv`，安装 CUDA 12.4 版 PyTorch、Infomap、Faiss 等依赖，服务器需有支持 CUDA 12.4 的 NVIDIA 驱动；仅用 CPU 时执行 `bash setup.sh --cpu`。预处理将源数据整理为历史序列、长度和预测目标，保存在 `runs/paper/data/<数据集>/prepared/`；同时生成 PreferDiff 的固定特征和 DDSR 的 OPQ 语义编码，保存在同级的 `semantic.pt`。原始数据保留在 `dataset/`。
 
-## 1. 数据预处理
+## 二阶段：训练 SASRec，生成全部候选集
 
-```powershell
-.\run.cmd --dataset Toys --output runs\toys --stage prepare
+```bash
+bash run.sh --stage candidates --output runs/paper
 ```
 
-读取 `dataset/ATG/` 中的 Toys 源数据，生成 `runs/toys/prepared/`，包含 `train.npz`、`val.npz`、`test.npz`、`train_target_counts.npy` 和 `metadata.json`。
+依次训练四个数据集、六个种子（100—105）的 SASRec，测试其验证集最佳模型，再生成训练、验证和测试集的 top-100 候选及对照候选。每组保存在 `runs/paper/candidates/<数据集>/seed_<种子>/`：
 
-## 2. 训练 SASRec，生成候选集
+- `sasrec_best.pt`、`sasrec_log.jsonl`、`report.json`：最佳 SASRec、每轮记录和测试结果。
+- `candidates.pt`：原候选集；`candidates_popularity.pt`、`candidates_swap.pt`：对照候选集。
+- `structure.pt`、`artifacts.json`：邻居、分区和结构说明。
 
-依次执行：
+该命令也会自动补做缺少的数据预处理。
 
-```powershell
-.\run.cmd --dataset Toys --output runs\toys --stage proposer
-.\run.cmd --dataset Toys --output runs\toys --stage artifacts
+## 三阶段：一键运行全部实验，逐个训练后测试
+
+```bash
+bash run.sh --stage experiments --output runs/paper
 ```
 
-第一条训练 SASRec，第二条加载最佳 SASRec，为训练、验证和测试样本生成 top-100 候选，并构建邻居和分区。产物均在 `runs/toys/`：
+主表包括 SASRec、Caser、GRU4Rec、BERT4Rec、PreferDiff、DiffRec、DDSR、PreferGrow、ChoiceGrow；SASRec 复用第二阶段结果。脚本用验证集选参数，并运行 2×2 消融、候选信息对照、Toys 前向对照，以及附录的初始化交叉、退出率审计与匹配重训、五分区重复、算子效率和 Steam 全测试集单条推理计时。每个正式模型训练完，立即加载验证最佳模型测试，再进入下一任务；调参试验只看验证集。
 
-- `sasrec_best.pt`：最佳 SASRec 模型。
-- `sasrec_log.jsonl`：SASRec 每轮训练记录。
-- `candidates.pt`：三个划分的候选集。
-- `structure.pt`、`artifacts.json`：邻居、分区等结构及配置信息。
+**训练轮次、损失、验证指标和测试结果实时显示在当前窗口。** 模型、日志和报告保存在 `runs/paper/experiments/<数据集>/<实验>/seed_<种子>/`。`report.json` 是测试结果；`runs/paper/summary/tables.md` 是汇总表，旁边有逐次结果 `runs.csv` 和按表分组的 JSON。效率结果在 `runs/paper/efficiency/`。
 
-## 3. 训练 Choice 主模型
+两个训练阶段默认均无总轮数上限，使用验证集早停；扩散模型正式测试使用三个固定采样流的均值。ChoiceGrow 开启固定候选质量门、保留新增邻居，主模型无辅助项；`guided_negatives` 是单独的论文对照实验。
 
-```powershell
-.\run.cmd --dataset Toys --output runs\toys --stage train
+关闭窗口或任务中断后，重新执行相同命令会复用已完成的任务；中断的单个训练会备份后从头重跑。修改配置后请使用新的 `--output`。所有运行产物在 `runs/` 中，均不上传 Git。
+
+重新跑全套实验时使用新的输出目录，例如将三个命令中的 `runs/paper` 均换为 `runs/paper_all`，以免复用旧结果。实验设置在 `config.json` 和 `paper_suite.json`；默认有 564 个正式任务（含 24 个复用的 SASRec），另有验证搜索和附录评测。各表对应、模型适配和参数说明见 [EXPERIMENTS.md](EXPERIMENTS.md)。
+
+只检查流程时，可运行小样本版本（单种子、每个模型一轮，不用于效果结论）：
+
+```bash
+bash run.sh --stage all --smoke --output runs/smoke
 ```
 
-使用预处理数据和候选集训练，保留邻居、开启固定候选质量门，不使用辅助项。生成 `runs/toys/choice_best.pt`、`choice_log.jsonl` 和 `training.json`，分别保存最佳模型、每轮训练记录和训练汇总。
-
-## 4. 测试最佳模型
-
-```powershell
-.\run.cmd --dataset Toys --output runs\toys --stage evaluate
-```
-
-加载最佳 Choice 模型，在测试集评估。结果显示在当前窗口，并保存到 `runs/toys/report.json`，包含 HR/NDCG@5、@10。
-
-## 一条命令运行完整主流程
-
-完成第 0 步后，也可以直接用下面的命令自动执行第 1—4 步：
-
-```powershell
-.\run.cmd --dataset Toys --output runs\toys_full
-```
-
-**阶段、训练轮次、损失、验证指标和最佳轮次会实时显示在运行命令的当前窗口中。** 训练记录同时保存到输出目录中的 `sasrec_log.jsonl` 和 `choice_log.jsonl`。
-
-默认自动选择 GPU，无 GPU 时使用 CPU。SASRec 和 Choice 均不设总轮数上限，分别在连续 10 轮、50 轮无验证改善后早停；Choice 每 10 轮验证一次。
-
-分步运行时保持相同的 `--output`；重新训练请换一个新的输出目录。所有生成产物位于 `runs/`，不会被 Git 上传。更换数据集时修改 `--dataset`，可选 `Toys`、`Sports`、`Beauty`、`Steam`、`ML1M`。
+只跑单个数据集时，在第二、三阶段都加 `--datasets Toys`；只跑主表时，第三阶段加 `--groups main`。所有阶段均支持 `--device cuda:0` 或 `--device cpu`。

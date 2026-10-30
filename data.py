@@ -86,13 +86,24 @@ def prepare(source_root, output, dataset, config):
     return report
 
 
+def prepared_root(output):
+    current, seen = Path(output), set()
+    while (current / "data_source.json").exists():
+        current = current.resolve()
+        if current in seen:
+            raise ValueError(f"Circular prepared-data reference at {current}")
+        seen.add(current)
+        current = Path(json.loads((current / "data_source.json").read_text(encoding="utf-8"))["path"])
+    return current
+
+
 def load_split(output, split):
-    with np.load(Path(output) / "prepared" / f"{split}.npz") as values:
+    with np.load(prepared_root(output) / "prepared" / f"{split}.npz") as values:
         return {key: torch.from_numpy(values[key].copy()) for key in values.files}
 
 
 def metadata(output):
-    return json.loads((Path(output) / "prepared" / "metadata.json").read_text(encoding="utf-8"))
+    return json.loads((prepared_root(output) / "prepared" / "metadata.json").read_text(encoding="utf-8"))
 
 
 def loader(values, batch_size, shuffle=False, seed=100, candidates=None):

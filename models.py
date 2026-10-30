@@ -87,6 +87,7 @@ class Denoiser(nn.Module):
         width, length = config["hidden_size"], config["history_length"]
         settings = config["training"]
         self.item_count = item_count
+        self.catalog_count = config.get("catalog_count", item_count)
         self.cap = settings["log_score_cap"]
         self.drop_history = 0.2 if config["dataset"] in {"Toys", "Sports"} else 0.1
         self.items = nn.Embedding(item_count + 1, width, padding_idx=item_count)
@@ -98,12 +99,24 @@ class Denoiser(nn.Module):
         nn.init.normal_(self.nonpreference.weight, std=1.0)
         self.history = HistoryEncoder(width, length, settings["heads"], settings["dropout"])
         self.output = nn.Linear(width * 3, width)
+        if config.get("method") == "prefergrow" and config.get("prefergrow", {}).get("variant") == "adaptive":
+            self.global_destination = nn.Parameter(torch.zeros(item_count))
+        if config["destination"].get("candidate_gate") == "dynamic_mass":
+            self.mass_head = nn.Linear(width, 1)
+            nn.init.zeros_(self.mass_head.weight)
+            m = config["destination"]["candidate_mass"]
+            p = min(max((m - .001) / .049, 1e-4), 1 - 1e-4)
+            nn.init.constant_(self.mass_head.bias, math.log(p / (1 - p)))
 
     def encode_history(self, sequence):
-        valid = sequence < self.item_count
+        valid = sequence < self.catalog_count
+        sequence = sequence.masked_fill(~valid, self.item_count)
         hidden = self.history(self.items(sequence) * valid[..., None], valid)
         # Preprocessing enforces nonempty, left-padded histories.
         return hidden[:, -1]
+
+    def candidate_mass(self, sequence):
+        return .001 + .049 * self.mass_head(self.encode_history(sequence)).sigmoid()
 
     def raw_scores(self, encoded_history, current, sigma):
         frequencies = torch.exp(-math.log(10000) * torch.arange(128, device=sigma.device) / 128)

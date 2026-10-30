@@ -1,0 +1,45 @@
+{
+  "datasets": ["Steam", "Beauty", "Toys", "Sports"],
+  "seeds": [100, 101, 102, 103, 104, 105],
+  "control_seeds": [100, 101, 102],
+  "partition_seeds": [200, 201, 202, 203, 204],
+  "groups": ["main", "factorial", "auxiliary", "forward", "matched_exit", "initialization", "partitions", "efficiency"],
+  "tuning": {
+    "enabled": true,
+    "trials": {"Steam": 50, "Beauty": 100, "Toys": 100, "Sports": 100},
+    "retrain_top": 3,
+    "learning_rate": [0.0001, 0.001],
+    "candidate_mass": [0.001, 0.05],
+    "reset_rate": [0.005, 0.30],
+    "root_share": [0.35, 0.85],
+    "fine_share": [0.60, 0.90]
+  },
+  "prefergrow": {
+    "variant": "hybrid",
+    "gamma": {"Steam": 0.99999, "Beauty": 0.999, "Toys": 0.9999, "Sports": 0.9999},
+    "learning_rate": {"Steam": 0.001, "Beauty": 0.0001, "Toys": 0.001, "Sports": 0.001}
+  },
+  "semantic": {
+    "embedding_files": {"Steam": "bert_emb.pickle", "Beauty": "3large_emb.pickle", "Toys": "3large_emb.pickle", "Sports": "3large_emb.pickle"},
+    "codebooks": 32,
+    "codebook_size": 256,
+    "opq_iterations": 20
+  },
+  "baselines": {
+    "tuning": true,
+    "learning_rates": [0.0001, 0.0003, 0.001],
+    "ddsr_skips": [100, 50, 35, 28, 23, 20, 17, 15],
+    "settings": {
+      "dropout": 0.1,
+      "caser_filters": 16,
+      "preferdiff": {"steps": 2000, "sampling_steps": 100, "guidance": 4.0, "gamma": 5.0, "lambda": 0.5},
+      "diffrec": {"steps": 5, "width": 1000, "noise_scale": 0.0001, "noise_min": 0.0005, "noise_max": 0.005, "sampling_steps": 0, "reweight": true},
+      "ddsr": {"steps": 1000, "skip": 100}
+    }
+  },
+  "fusion_weights": [0.0, 0.01, 0.03, 0.1, 0.3, 1.0],
+  "guided_negative_weights": [0.01, 0.1, 1.0],
+  "infomap_restarts": 3,
+  "benchmark": {"dense_sizes": [1000, 2000, 3000, 4000, 5000], "large_size": 100000, "warmup": 3, "repeats": 10, "runs": 3, "end_to_end_dataset": "Steam", "end_to_end_seed": 100},
+  "dataset_overrides": {}
+}

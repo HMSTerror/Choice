@@ -8,7 +8,7 @@ from unittest.mock import patch
 import torch
 from torch import nn
 
-from train import train_diffusion, train_proposer
+from train import better, train_diffusion, train_proposer
 
 
 class TinyProposer(nn.Module):
@@ -45,6 +45,10 @@ class EarlyStoppingTests(unittest.TestCase):
                        "length": torch.tensor([2, 2]), "target": torch.tensor([2, 3])}
         self.device = torch.device("cpu")
 
+    def test_only_validation_ndcg_selects_checkpoint(self):
+        self.assertFalse(better({"ndcg@10": .2, "hr@10": .9}, {"ndcg@10": .2, "hr@10": .1}))
+        self.assertTrue(better({"ndcg@10": .21, "hr@10": .1}, {"ndcg@10": .2, "hr@10": .9}))
+
     def test_uncapped_proposer_stops_after_validation_plateau_and_keeps_best(self):
         self.config["sasrec"].update(epochs=0, patience=2, batch_size=2, negatives=2)
         with tempfile.TemporaryDirectory() as directory, \
@@ -64,6 +68,7 @@ class EarlyStoppingTests(unittest.TestCase):
         self.config["training"].update(epochs=0, patience=4, validation_interval=2, batch_size=2)
         with tempfile.TemporaryDirectory() as directory, \
              patch("train.load_process", return_value=TinyProcess()), \
+             patch("train.metadata", return_value={"item_count": 6}), \
              patch("train.load_split", return_value=self.values), \
              patch("train.Denoiser", TinyDenoiser), \
              patch("train.evaluate_diffusion", side_effect=[metrics(v) for v in [.1, .2, .2, .2]]) as evaluate, \

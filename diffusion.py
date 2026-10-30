@@ -28,14 +28,15 @@ class ChoiceProcess(nn.Module):
         super().__init__()
         self.settings = config["diffusion"]
         self.destination = config["destination"]
-        if self.destination.get("candidate_gate", "fixed_mass") != "fixed_mass":
-            raise ValueError("This minimal experiment uses the fixed_mass candidate gate")
+        if self.destination.get("candidate_gate", "fixed_mass") not in {"fixed_mass", "dynamic_mass"}:
+            raise ValueError("Unknown candidate gate")
         for name in ("base", "blocks", "neighbor_ids", "neighbor_weights"):
             self.register_buffer(name, artifact[name])
         self.item_count = len(self.base)
         alpha = self.settings["reset_rate"]
-        self.rates = tuple((1 - alpha) * value for value in self.settings["level_rates"])
-        self.reset_rate = alpha
+        scale = self.settings.get("rate_scale", 1.)
+        self.rates = tuple(scale * (1 - alpha) * value for value in self.settings["level_rates"])
+        self.reset_rate = scale * alpha
         # Column-source convention: bridge P_l G represents the paper's G P_l.
         # P_root G = P_root, so the three-level representation needs seven coordinates.
         self.basis = (("I", -1), ("P", 0), ("P", 1), ("P", 2),
@@ -63,17 +64,21 @@ class ChoiceProcess(nn.Module):
         table = torch.tensor([[self.basis.index(product(a, b)) for b in self.basis]
                               for a in self.basis])
         structure = F.one_hot(table, len(self.basis)).permute(0, 2, 1).double()
-        generator = torch.tensor([-sum(self.rates) - alpha, *self.rates, alpha, 0., 0.],
+        generator = torch.tensor([-sum(self.rates) - self.reset_rate, *self.rates, self.reset_rate, 0., 0.],
                                  dtype=torch.float64)
         self.register_buffer("algebra", torch.einsum("l,ldr->dr", generator, structure))
 
-    def context(self, sequence, candidates):
+    def context(self, sequence, candidates, model=None):
         base = self.base.expand(len(sequence), -1)
+        if self.destination.get("mode", "user") == "shared":
+            return Context(base, tuple(self.block_sum(base, level) for level in range(3)))
         mask = torch.zeros_like(base).scatter(1, candidates, 1.0)
-        inside, outside = base * mask, base * (1 - mask)
+        weights_base = torch.ones_like(base) if self.destination.get("weighting") == "uniform" else base
+        inside, outside = weights_base * mask, weights_base * (1 - mask)
         if torch.any(inside.sum(-1) <= 0) or torch.any(outside.sum(-1) <= 0):
             raise ValueError("The candidate set must be a nonempty proper catalog subset")
-        mass = self.destination["candidate_mass"]
+        mass = (model.candidate_mass(sequence) if self.destination.get("candidate_gate") == "dynamic_mass"
+                else self.destination["candidate_mass"])
         rho = mass * inside / inside.sum(-1, keepdim=True)
         rho = rho + (1 - mass) * outside / outside.sum(-1, keepdim=True)
         valid = sequence < self.item_count
@@ -156,19 +161,36 @@ class ChoiceProcess(nn.Module):
         time = grid[torch.randint(len(grid), (len(target),), device=target.device)]
         log_range = math.log(settings["sigma_max"] / settings["sigma_min"])
         sigma = settings["sigma_min"] * torch.exp(time * log_range)
-        context = self.context(sequence, candidates)
+        context = self.context(sequence, candidates, model)
         probability = self.forward_probability(target, sigma, context)
         current = torch.multinomial(probability, 1).squeeze(1)
         score = model(sequence, current, sigma)
         # The sole training objective: derivative-weighted denoising score entropy.
-        return (sigma * log_range * self.entropy(score, probability, current, context)).mean()
+        values = sigma * log_range * self.entropy(score, probability, current, context)
+        if self.destination.get("candidate_gate") == "dynamic_mass" or hasattr(model, "global_destination"):
+            # Include the discrete-sampling score-function term when learning Q.
+            logp = probability.gather(1, current[:, None]).squeeze(1).log()
+            values = values + values.detach() * (logp - logp.detach())
+        weight = self.settings.get("guided_negative_weight", 0.)
+        if weight:
+            target_score = score.gather(1, target[:, None])
+            negative_score = score.gather(1, candidates)
+            valid = candidates != target[:, None]
+            ranking = (F.softplus(negative_score - target_score) * valid).sum(-1) / valid.sum(-1).clamp_min(1)
+            values = values + weight * ranking
+        return values.mean()
 
     @torch.no_grad()
     def sample_scores(self, model, sequence, candidates, guidance):
         settings = self.settings
-        context = self.context(sequence, candidates)
+        context = self.context(sequence, candidates, model)
         history = model.encode_history(sequence)
-        current = torch.multinomial(self.terminal_reference(settings["sigma_max"], context), 1).squeeze(1)
+        initial = (self.base.expand_as(context.rho) if settings.get("initialization") == "shared_base"
+                   else self.terminal_reference(settings["sigma_max"], context))
+        if hasattr(self, "reference_process"):
+            reference_context = self.reference_process.context(sequence, candidates, model)
+            initial = self.reference_process.terminal_reference(settings["sigma_max"], reference_context)
+        current = torch.multinomial(initial, 1).squeeze(1)
         grid = torch.linspace(settings["sigma_max"], settings["sigma_min"],
                               settings["reverse_intervals"] + 1, device=sequence.device)
         step_count = torch.zeros(len(sequence), device=sequence.device)
