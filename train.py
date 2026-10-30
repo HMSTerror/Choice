@@ -262,8 +262,7 @@ def final_evaluation(output, config, device):
                                 device, "test", config["training"]["test_streams"])
     report = {"dataset": config["dataset"], "seed": config["seed"], "smoke": config["smoke"],
               "best_epoch": state["epoch"], "selection_split": "val", "objective": state["objective"],
-              "neighbor_mix": config["destination"]["neighbor_mix"], "test": result,
-              "note": "Smoke connectivity check" if config["smoke"] else "Independent minimal experiment; not a reproduced paper metric"}
+              "neighbor_mix": config["destination"]["neighbor_mix"], "test": result}
     write_json(Path(output) / "report.json", report)
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
     return report
