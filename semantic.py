@@ -13,6 +13,7 @@ import time
 
 def whiten_features(features, seen, width=None):
     """Fit on training items; preserve all source dimensions outside smoke runs."""
+    import numpy as np
     import torch
     fit = features[seen]
     mean = fit.mean(0)
@@ -21,8 +22,12 @@ def whiten_features(features, seen, width=None):
         _, singular, vectors = torch.pca_lowrank(fit - mean, q=rank, center=False, niter=4)
         scale = (len(fit) - 1) ** .5 / singular.clamp_min(1e-5)
         return torch.nn.functional.pad((features - mean) @ vectors * scale, (0, width - rank))
-    covariance = (fit - mean).T @ (fit - mean) / (len(fit) - 1)
-    eigenvalues, vectors = torch.linalg.eigh(covariance)
+    centered = (fit - mean).double()
+    covariance = centered.T @ centered / (len(fit) - 1)
+    # NumPy/LAPACK avoids MKL SSYEVD workspace errors observed at native 3072D.
+    eigenvalues, vectors = np.linalg.eigh(covariance.cpu().numpy())
+    eigenvalues = torch.from_numpy(eigenvalues).to(features)
+    vectors = torch.from_numpy(vectors).to(features)
     return (features - mean) @ vectors * eigenvalues.clamp_min(1e-6).rsqrt()
 
 
