@@ -61,7 +61,7 @@ def source_dir(root, dataset, seed):
     return root / "candidates" / dataset / f"seed_{seed}"
 
 
-def preprocessing(root, base, suite, datasets, smoke):
+def preprocessing(root, base, suite, datasets, smoke, semantics=True):
     for dataset in datasets:
         directory = root / "data" / dataset
         config = config_for(base, dataset, suite["seeds"][0], smoke)
@@ -71,13 +71,14 @@ def preprocessing(root, base, suite, datasets, smoke):
             prepare(ROOT / "dataset", directory, dataset, config)
         else:
             print(f"[reuse prepared] {dataset}", flush=True)
-        if not (directory / "semantic.pt").exists():
+        if semantics and not (directory / "semantic.pt").exists():
             print(f"[semantic preprocessing] {dataset}: PreferDiff whitening + DDSR OPQ", flush=True)
             semantic_preprocessing(ROOT / "dataset", directory, config, suite["semantic"])
 
 
-def candidate_stage(root, base, suite, datasets, seeds, device, smoke):
-    preprocessing(root, base, suite, datasets, smoke)
+def candidate_stage(root, base, suite, datasets, seeds, device, smoke, prepare_data=True):
+    if prepare_data:
+        preprocessing(root, base, suite, datasets, smoke)
     for dataset in datasets:
         for seed in seeds:
             output = source_dir(root, dataset, seed)
@@ -191,16 +192,9 @@ def tune_baseline(root, base, suite, dataset, method, source, device, smoke, see
     target = root / "selected" / f"{dataset}_{method}.json"
     if target.exists():
         return json.loads(target.read_text(encoding="utf-8"))["config"]
-    config = experiment_config(base, suite, dataset, seed, method, source, smoke)
-    config["semantic_file"] = str(root / "data" / dataset / "semantic.pt")
     candidates = []
     enabled = suite["baselines"]["tuning"] and suite["tuning"]["enabled"]
-    rates = suite["baselines"]["learning_rates"] if enabled and not smoke else [config["training"]["learning_rate"]]
-    skips = suite["baselines"]["ddsr_skips"] if enabled and method == "ddsr" and not smoke else [config["baseline"]["ddsr"]["skip"]]
-    for index, (rate, skip) in enumerate((r, s) for r in rates for s in skips):
-        trial = deepcopy(config)
-        trial["training"]["learning_rate"] = rate
-        trial["baseline"]["ddsr"]["skip"] = skip
+    for index, trial in enumerate(baseline_search_configs(root, base, suite, dataset, method, source, smoke, seed)):
         if enabled:
             result = train_run(root / "baseline_tuning" / dataset / method / f"trial_{index:03d}", source, trial, device, test=False)
             candidates.append((result["best_validation"]["ndcg@10"], trial))
@@ -210,6 +204,44 @@ def tune_baseline(root, base, suite, dataset, method, source, device, smoke, see
     write_json(target, {"config": config, "selection_split": "val", "trials": len(candidates),
                        "test_evaluated_during_search": False})
     return config
+
+
+def choice_search_configs(base, suite, dataset, seed, source, smoke):
+    """Deterministic search proposals shared by serial and parallel execution."""
+    settings = suite["tuning"]
+    if not settings["enabled"] or suite.get("dataset_overrides", {}).get(dataset):
+        return []
+    rng = np.random.default_rng(seed)
+    configs = []
+    for _ in range(1 if smoke else settings["trials"][dataset]):
+        config = config_for(base, dataset, seed, smoke)
+        low, high = settings["learning_rate"]
+        config["training"]["learning_rate"] = float(np.exp(rng.uniform(np.log(low), np.log(high))))
+        for key in ("candidate_mass", "reset_rate"):
+            section = "destination" if key == "candidate_mass" else "diffusion"
+            config[section][key] = float(rng.uniform(*settings[key]))
+        root_share, fine_share = rng.uniform(*settings["root_share"]), rng.uniform(*settings["fine_share"])
+        total = -math.log(.1)
+        config["diffusion"]["level_rates"] = [total * (1 - root_share) * fine_share,
+                   total * (1 - root_share) * (1 - fine_share), total * root_share]
+        configs.append(attach_inputs(arm_config(config, "choicegrow", suite), source))
+    return configs
+
+
+def baseline_search_configs(root, base, suite, dataset, method, source, smoke, seed):
+    config = experiment_config(base, suite, dataset, seed, method, source, smoke)
+    config["semantic_file"] = str(root / "data" / dataset / "semantic.pt")
+    enabled = suite["baselines"]["tuning"] and suite["tuning"]["enabled"]
+    rates = suite["baselines"]["learning_rates"] if enabled and not smoke else [config["training"]["learning_rate"]]
+    skips = suite["baselines"]["ddsr_skips"] if enabled and method == "ddsr" and not smoke else [config["baseline"]["ddsr"]["skip"]]
+    configs = []
+    for rate in rates:
+        for skip in skips:
+            trial = deepcopy(config)
+            trial["training"]["learning_rate"] = rate
+            trial["baseline"]["ddsr"]["skip"] = skip
+            configs.append(trial)
+    return configs
 
 
 def tune_dataset(root, base, suite, dataset, device, smoke, seed=None):
@@ -224,21 +256,9 @@ def tune_dataset(root, base, suite, dataset, device, smoke, seed=None):
         selected[section].update(values)
     settings = suite["tuning"]
     if settings["enabled"] and not override:
-        rng = np.random.default_rng(seed)
         rows = []
         trials = 1 if smoke else settings["trials"][dataset]
-        for trial in range(trials):
-            config = deepcopy(selected)
-            low, high = settings["learning_rate"]
-            config["training"]["learning_rate"] = float(np.exp(rng.uniform(np.log(low), np.log(high))))
-            for key in ("candidate_mass", "reset_rate"):
-                section = "destination" if key == "candidate_mass" else "diffusion"
-                config[section][key] = float(rng.uniform(*settings[key]))
-            root_share, fine_share = rng.uniform(*settings["root_share"]), rng.uniform(*settings["fine_share"])
-            total = -math.log(.1)
-            config["diffusion"]["level_rates"] = [total * (1 - root_share) * fine_share,
-                      total * (1 - root_share) * (1 - fine_share), total * root_share]
-            config = attach_inputs(arm_config(config, "choicegrow", suite), source)
+        for trial, config in enumerate(choice_search_configs(base, suite, dataset, seed, source, smoke)):
             result = train_run(root / "tuning" / dataset / f"trial_{trial:03d}", source, config, device, test=False)
             rows.append((result["best_validation"]["ndcg@10"], trial, config))
         retrained = []
@@ -474,14 +494,16 @@ def jobs(suite, datasets, seeds, groups):
     return list(result.values())
 
 
-def experiment_stage(root, base, suite, datasets, seeds, groups, device, smoke):
+def experiment_stage(root, base, suite, datasets, seeds, groups, device, smoke, job_subset=None, finalize=True):
     if not set(seeds).issubset(suite["seeds"]):
         raise ValueError(f"--seeds must be chosen from {suite['seeds']}")
-    plan = jobs(suite, datasets, seeds, groups)
-    write_json(root / "experiment_plan.json", plan)
+    plan = jobs(suite, datasets, seeds, groups) if job_subset is None else job_subset
+    if job_subset is None:
+        write_json(root / "experiment_plan.json", plan)
     chosen, baseline_choices = {}, {}
     for dataset in datasets:
-        for seed in seeds:
+        needed_seeds = seeds if job_subset is None else sorted({row["seed"] for row in plan if row["dataset"] == dataset})
+        for seed in needed_seeds:
             if not (source_dir(root, dataset, seed) / "controls.json").exists():
                 raise FileNotFoundError(f"Missing candidates for {dataset} seed {seed}; run --stage candidates first")
         if any(j["dataset"] == dataset and j["arm"] not in BASELINES for j in plan):
@@ -504,13 +526,17 @@ def experiment_stage(root, base, suite, datasets, seeds, groups, device, smoke):
         else:
             config = experiment_config(chosen[dataset], suite, dataset, seed, underlying, source, smoke)
         config["experiment"] = arm
-        config["full_level_rates"] = chosen[dataset]["diffusion"]["level_rates"]
-        config["suite_neighbor_mix"] = chosen[dataset]["destination"]["neighbor_mix"]
+        inherited = base if arm in BASELINES else chosen[dataset]
+        config["full_level_rates"] = inherited["diffusion"]["level_rates"]
+        config["suite_neighbor_mix"] = inherited["destination"]["neighbor_mix"]
         if arm.startswith("real") or partition is not None:
             kind = "real" if arm.startswith("real") else "shuffle"
             partition_seed = partition if partition is not None else base["diffusion"]["partition_seed"]
             structure = root / "scopes" / dataset / f"{kind}_{partition_seed}.pt"
-            if not structure.exists():
+            if job_subset is not None:
+                from parallel import locked_scope_build
+                locked_scope_build(source, structure, {**config, "suite": suite}, kind, partition_seed)
+            elif not structure.exists():
                 print(f"[scope] {dataset} {kind} seed={partition_seed}", flush=True)
                 scope_artifact(source, structure, {**config, "suite": suite}, kind, partition_seed)
             config["structure_file"] = str(structure)
@@ -546,11 +572,13 @@ def experiment_stage(root, base, suite, datasets, seeds, groups, device, smoke):
                 write_json(audit, mean_hazard(source, config, device, "test", diagnostics=True))
         if ("partitions" in groups or "forward" in groups) and arm in {"choicegrow", "real_scope", "shuffle_partition", "real_partition"}:
             scope_diagnostics(directory, config, device)
-        summary(root)
-    if "efficiency" in groups:
+        if finalize:
+            summary(root)
+    if finalize and "efficiency" in groups:
         from benchmark import run_benchmarks
         run_benchmarks(root, suite, device, smoke)
-    summary(root)
+    if finalize:
+        summary(root)
 
 
 def main(argv=None):
@@ -565,6 +593,8 @@ def main(argv=None):
     parser.add_argument("--device", default="auto")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--skip-tuning", action="store_true")
+    parser.add_argument("--workers", type=int, default=1, help="Concurrent independent GPU training processes")
+    parser.add_argument("--tf32", action="store_true", help="Enable TF32 matrix multiplication on Ampere GPUs")
     args = parser.parse_args(argv)
     base = json.loads(path_at_root(args.config).read_text(encoding="utf-8"))
     suite = json.loads(path_at_root(args.suite).read_text(encoding="utf-8"))
@@ -590,6 +620,13 @@ def main(argv=None):
     if args.stage == "plan":
         print(json.dumps(jobs(suite, datasets, seeds, groups), ensure_ascii=False, indent=2))
         return
+    if args.workers < 1:
+        raise ValueError("--workers must be positive")
+    if args.workers > 1 and args.stage in {"all", "candidates", "experiments"}:
+        from parallel import parallel_workflow
+        parallel_workflow(root, base, suite, datasets, seeds, groups, args.device, args.smoke,
+                          args.workers, args.stage, args.tf32)
+        return
     contract = {"base": base, "suite": suite, "smoke": args.smoke}
     contract_path = root / "workflow_config.json"
     if args.stage != "summary":
@@ -597,6 +634,9 @@ def main(argv=None):
             raise ValueError("Workflow settings changed; choose a new --output")
         write_json(contract_path, contract)
     torch.set_num_threads(base["threads"])
+    if args.tf32:
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cudnn.allow_tf32 = True
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu") if args.device == "auto" else torch.device(args.device)
     if args.stage in {"prepare", "all"}:
         preprocessing(root, base, suite, datasets, args.smoke)

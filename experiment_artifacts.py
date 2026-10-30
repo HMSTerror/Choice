@@ -93,8 +93,8 @@ def build_controls(output, config):
     values = {split: load_split(output, split) for split in SPLITS}
     counts = popularity_counts(values["train"], len(structure["base"]))
     popular, swap = control_candidates(original, values, counts, config["seed"])
-    torch.save(popular, output / "candidates_popularity.pt")
-    torch.save(swap, output / "candidates_swap.pt")
+    torch.save({key: value.to(torch.int32) for key, value in popular.items()}, output / "candidates_popularity.pt")
+    torch.save({key: value.to(torch.int32) for key, value in swap.items()}, output / "candidates_swap.pt")
     write_json(output / "controls.json", {"statistics_split": "train", "match_window": 64,
                "candidate_controls": ["original", "popularity", "swap"],
                "target_used_for_validation_or_test_candidates": False})

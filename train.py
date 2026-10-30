@@ -135,7 +135,7 @@ def build_artifacts(output, config, device):
             blocked.scatter_(1, sequence, True)
             scores.masked_fill_(blocked[:, :n], -torch.inf)
             rows.append(scores.topk(k, -1).indices.cpu())
-        candidates[split] = torch.cat(rows)
+        candidates[split] = torch.cat(rows).to(torch.int32)
     torch.save(candidates, Path(output) / "candidates.pt")
     training = load_split(output, "train")
     destination = config["destination"]
