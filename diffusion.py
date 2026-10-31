@@ -8,6 +8,25 @@ from torch import nn
 import torch.nn.functional as F
 
 
+def sample_training_noise(batch_size, settings, device):
+    """NewChoice losses.py sigma-derivative proposal, corrected to uniform-grid expectation."""
+    grid = torch.linspace(1., .001, settings["training_intervals"] + 1, device=device)
+    log_range = math.log(settings["sigma_max"] / settings["sigma_min"])
+    sigma = settings["sigma_min"] * torch.exp(grid * log_range)
+    derivative = sigma * log_range
+    mode = settings.get("time_sampling", "uniform")
+    if mode == "uniform":
+        indices = torch.randint(len(grid), (batch_size,), device=device)
+        correction = 1.
+    elif mode == "sigma_importance":
+        probability = .1 / len(grid) + .9 * derivative.detach() / derivative.detach().sum()
+        indices = torch.multinomial(probability, batch_size, replacement=True)
+        correction = (1. / (len(grid) * probability[indices])).detach()
+    else:
+        raise ValueError(f"Unsupported time_sampling: {mode}")
+    return sigma[indices], derivative[indices] * correction
+
+
 @dataclass
 class Context:
     rho: torch.Tensor
@@ -157,16 +176,13 @@ class ChoiceProcess(nn.Module):
 
     def loss(self, model, sequence, target, candidates):
         settings = self.settings
-        grid = torch.linspace(1., .001, settings["training_intervals"] + 1, device=target.device)
-        time = grid[torch.randint(len(grid), (len(target),), device=target.device)]
-        log_range = math.log(settings["sigma_max"] / settings["sigma_min"])
-        sigma = settings["sigma_min"] * torch.exp(time * log_range)
+        sigma, entropy_weight = sample_training_noise(len(target), settings, target.device)
         context = self.context(sequence, candidates, model)
         probability = self.forward_probability(target, sigma, context)
         current = torch.multinomial(probability, 1).squeeze(1)
         score = model(sequence, current, sigma)
         # The sole training objective: derivative-weighted denoising score entropy.
-        values = sigma * log_range * self.entropy(score, probability, current, context)
+        values = entropy_weight * self.entropy(score, probability, current, context)
         if self.destination.get("candidate_gate") == "dynamic_mass" or hasattr(model, "global_destination"):
             # Include the discrete-sampling score-function term when learning Q.
             logp = probability.gather(1, current[:, None]).squeeze(1).log()

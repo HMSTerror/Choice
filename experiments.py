@@ -117,6 +117,8 @@ def arm_config(config, arm, suite):
     config["method"] = "choicegrow"
     if arm in BASELINES:
         config["method"] = arm
+        # Baseline patience is independent of the ChoiceGrow protocol.
+        config["training"]["patience"] = 50
         config["baseline"] = deepcopy(suite["baselines"]["settings"])
         config["training"]["learning_rate"] = suite["baselines"]["learning_rates"][0]
         profile = suite["baselines"].get("fixed_configs", {}).get(arm, {})
@@ -153,6 +155,8 @@ def arm_config(config, arm, suite):
         diffusion["level_rates"] = [total / 3] * 3
     if arm in {"prefergrow", "guided_negatives"}:
         config["method"] = "prefergrow"
+        config["training"]["patience"] = 50
+        config["diffusion"]["time_sampling"] = "uniform"
         destination.update(mode="shared", neighbor_mix=0., candidate_gate="fixed_mass")
         config["prefergrow"] = {"variant": suite["prefergrow"]["variant"],
                                 "gamma": suite["prefergrow"]["gamma"][config["dataset"]]}

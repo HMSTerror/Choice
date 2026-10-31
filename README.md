@@ -53,6 +53,8 @@ ChoiceGrow（含其消融）每个训练目录只保留 `choice_best.pt`（验�
 
 两个训练阶段默认均无总轮数上限，使用验证集早停；扩散模型正式测试使用三个固定采样流的均值。ChoiceGrow 开启固定候选质量门、保留新增邻居，主模型无辅助项；`guided_negatives` 是单独的论文对照实验。
 
+ChoiceGrow 使用与 NewChoice 对齐的 DDiT 去噪器、有界 `oricosChoice` 分数和 `sigma_importance` 时间采样，早停耐心值为 100 个 epoch。旧版去噪器的训练结果不能直接复用，请换新输出目录；对齐依据与验证命令见 [实现对齐](docs/NEWCHOICE_ALIGNMENT.md)。
+
 关闭窗口或任务中断后，重新执行相同命令会复用已完成的任务；中断的单个训练备份日志后从头重跑，不累积旧权重。修改配置后请使用新的 `--output`。所有运行产物在 `runs/` 中，均不上传 Git。
 
 重新跑全套实验时使用新的输出目录，例如将三个命令中的 `runs/paper` 均换为 `runs/paper_all`，以免复用旧结果。实验设置在 `config.json` 和 `paper_suite.json`；默认有 468 个正式任务（含 12 个复用的主表 SASRec），并行全流程共 528 个任务，另有附录评测。主表种子由 `main_seeds` 设置；其他主实验种子仍由 `seeds` 设置。来源及不能由当前数据恢复的原论文协议差异见 [配置核查](docs/BASELINE_PAPER_CONFIGS.md)，各表对应见 [EXPERIMENTS.md](EXPERIMENTS.md)。
