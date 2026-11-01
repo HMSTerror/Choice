@@ -14,6 +14,9 @@ import torch.nn.functional as F
 
 from data import loader, load_split, metadata, write_json
 from models import SASRec
+from bert4rec import (BERT4Rec, PROTOCOL as BERT_PROTOCOL, training_loader as bert_training_loader,
+                      evaluation_candidates as bert_evaluation_candidates,
+                      ranking_totals as bert_ranking_totals)
 from train import (append_log, better, evaluation_rng, evaluate_proposer,
                    ranking_totals, seed_all, training_epochs)
 
@@ -219,58 +222,6 @@ class Caser(nn.Module):
         positive = (state * self.output(target)).sum(-1) + self.bias(target).squeeze(-1)
         negative = (state[:, None] * self.output(negatives)).sum(-1) + self.bias(negatives).squeeze(-1)
         return F.softplus(-positive).mean() + F.softplus(negative).mean()
-
-
-class BERT4Rec(nn.Module):
-    def __init__(self, n, config):
-        super().__init__()
-        self.n, self.mask_id = n, n + 1
-        d = config["hidden_size"]
-        settings = config["baseline"]
-        self.mask_probability = settings.get("bert_mask_probability", .2)
-        self.items = nn.Embedding(n + 2, d, padding_idx=n)
-        self.positions = nn.Embedding(config["history_length"] + 1, d)
-        layer = nn.TransformerEncoderLayer(d, settings.get("bert_heads", 2), 4 * d, settings["dropout"],
-                    activation="gelu", batch_first=True, norm_first=False, layer_norm_eps=1e-12)
-        layer.self_attn.dropout = settings.get("bert_attention_dropout", settings["dropout"])
-        self.encoder = nn.TransformerEncoder(layer, settings.get("bert_layers", 1), enable_nested_tensor=False)
-        self.norm = nn.LayerNorm(d, eps=1e-12)
-        self.dropout = nn.Dropout(settings["dropout"])
-        self.prediction = (nn.Sequential(nn.Linear(d, d), nn.GELU(), nn.LayerNorm(d, eps=1e-12))
-                           if settings.get("bert_prediction_transform") else nn.Identity())
-        self.output_bias = nn.Parameter(torch.zeros(n))
-        self.apply(self.initialize)
-
-    def initialize(self, module):
-        if isinstance(module, (nn.Linear, nn.Embedding)):
-            nn.init.normal_(module.weight, std=.02)
-            if isinstance(module, nn.Linear) and module.bias is not None:
-                nn.init.zeros_(module.bias)
-            if isinstance(module, nn.Embedding) and module.padding_idx is not None:
-                with torch.no_grad():
-                    module.weight[module.padding_idx].zero_()
-
-    def encode(self, sequence):
-        hidden = self.items(sequence) + self.positions(torch.arange(sequence.shape[1], device=sequence.device))
-        hidden = self.dropout(self.norm(hidden))
-        return self.prediction(self.encoder(hidden, src_key_padding_mask=sequence == self.n))
-
-    def loss(self, sequence, lengths, target):
-        clean = torch.cat((sequence, target[:, None]), -1)
-        selected = (torch.rand_like(clean.float()) < self.mask_probability) & (clean < self.n)
-        # Ensure every history supplies supervision, including very short ones.
-        selected[:, -1] |= ~selected.any(-1)
-        draw = torch.rand_like(clean.float())
-        corrupt = clean.clone()
-        corrupt[selected & (draw < .8)] = self.mask_id
-        random_mask = selected & (draw >= .8) & (draw < .9)
-        corrupt[random_mask] = torch.randint(self.n, (int(random_mask.sum()),), device=sequence.device)
-        logits = self.encode(corrupt)[selected] @ self.items.weight[:self.n].T + self.output_bias
-        return F.cross_entropy(logits, clean[selected])
-
-    def forward(self, sequence, lengths):
-        sequence = torch.cat((sequence, torch.full_like(sequence[:, :1], self.mask_id)), -1)
-        return self.encode(sequence)[:, -1] @ self.items.weight[:self.n].T + self.output_bias
 
 
 class Gaussian(nn.Module):
@@ -498,8 +449,24 @@ def make_baseline(output, config, device):
 
 
 @torch.no_grad()
-def evaluate_baseline(model, values, config, device, split, streams):
+def evaluate_baseline(model, values, config, device, split, streams, candidates=None):
     model.eval()
+    if config["method"] == "bert4rec":
+        if candidates is None:
+            raise ValueError("BERT4Rec requires fixed sampled evaluation candidates")
+        totals = {}
+        with torch.no_grad():
+            for sequence, lengths, _, ids in loader(values, config["training"]["eval_batch_size"], candidates=candidates):
+                scores = model.candidate_scores(sequence.to(device), lengths.to(device), ids.to(device))
+                if not torch.isfinite(scores).all():
+                    raise FloatingPointError("Invalid BERT4Rec candidate scores")
+                for key, value in bert_ranking_totals(scores).items():
+                    totals[key] = totals.get(key, 0.) + value
+        result = {key: value / len(values["target"]) for key, value in totals.items()}
+        return {**result, "examples": len(values["target"]), "streams": 1, "per_stream": [result],
+                "evaluation_protocol": BERT_PROTOCOL, "negative_count": candidates.shape[1] - 1,
+                "candidate_seed": config["baseline"].get("bert_eval_seed", 12345),
+                "popularity_source": "train_history_and_target_occurrences"}
     results = []
     for stream in range(streams):
         totals = {}
@@ -522,15 +489,23 @@ def train_baseline(output, config, device):
     model = make_baseline(output, config, device)
     optimizer = make_baseline_optimizer(model, config)
     training, validation = load_split(output, "train"), load_split(output, "val")
-    batches = loader(training, settings["batch_size"], shuffle=True, seed=config["seed"])
+    bert = config["method"] == "bert4rec"
+    batches = (bert_training_loader(training, model, config) if bert else
+               loader(training, settings["batch_size"], shuffle=True, seed=config["seed"]))
+    validation_candidates = bert_evaluation_candidates(output, validation, config, "val") if bert else None
     best, best_epoch, best_seconds, best_state = None, 0, 0., None
     started = time.perf_counter()
     step = 0
     for epoch in training_epochs(settings["epochs"]):
         model.train()
         total, examples = 0., 0
-        for sequence, lengths, target in batches:
-            loss = model.loss(sequence.to(device), lengths.to(device), target.to(device))
+        for batch in batches:
+            if bert:
+                sequence, labels = batch
+                loss = model.masked_loss(sequence.to(device), labels.to(device))
+            else:
+                sequence, lengths, target = batch
+                loss = model.loss(sequence.to(device), lengths.to(device), target.to(device))
             if not torch.isfinite(loss):
                 raise FloatingPointError(f"Nonfinite {config['method']} loss")
             optimizer.zero_grad(set_to_none=True)
@@ -541,11 +516,13 @@ def train_baseline(output, config, device):
                 group["lr"] = baseline_learning_rate(settings, step)
             optimizer.step()
             step += 1
-            total += float(loss.detach()) * len(target)
-            examples += len(target)
+            count = int((labels != -100).sum()) if bert else len(target)
+            total += float(loss.detach()) * count
+            examples += count
         metrics = None
         if epoch % settings["validation_interval"] == 0 or epoch == settings["epochs"]:
-            metrics = evaluate_baseline(model, validation, config, device, "val", settings["validation_streams"])
+            extra = {"candidates": validation_candidates} if bert else {}
+            metrics = evaluate_baseline(model, validation, config, device, "val", settings["validation_streams"], **extra)
             if better(metrics, best):
                 best, best_epoch, best_seconds = metrics, epoch, time.perf_counter() - started
                 # Keep the validation winner on CPU for the immediate test, without a model file.
@@ -577,7 +554,10 @@ def test_baseline(output, config, device, checkpoint=None):
             # Compatibility with fits already running when the retention policy changed.
             checkpoint = torch.load(output / "baseline_best.pt", weights_only=True, map_location=device)
         model.load_state_dict(checkpoint["model"])
-        result = evaluate_baseline(model, load_split(output, "test"), config, device, "test", config["training"]["test_streams"])
+        values = load_split(output, "test")
+        extra = ({"candidates": bert_evaluation_candidates(output, values, config, "test")}
+                 if config["method"] == "bert4rec" else {})
+        result = evaluate_baseline(model, values, config, device, "test", config["training"]["test_streams"], **extra)
     report = {"dataset": config["dataset"], "method": config["method"], "seed": config["seed"],
               "smoke": config["smoke"], "best_epoch": checkpoint["epoch"], "selection_split": "val", "test": result}
     write_json(output / "report.json", report)

@@ -67,6 +67,8 @@ ChoiceGrow使用用户提供的明确数值：lr=`0.0006167980008189615`、m=`.0
 
 ## BERT4Rec
 
+**当前实现已按作者脚本修正**：固定遮盖数、全 MASK、10 份固定副本加 mask-last、右侧 padding、50 位置容量，以及独立 Q/K/V、初始化、GELU、token type 和 MLM 词表。验证/测试采用 100 个流行度负例，训练 MLM 仍使用全词表交叉熵。具体对照、训练词频与原版差异、仅重跑命令见 [BERT4Rec 核查与重跑](BERT4REC_ALIGNMENT.md)。
+
 来源：[BERT4Rec](https://arxiv.org/abs/1904.06690)，§4.3；作者 [FeiSun/BERT4Rec @615eaf2](https://github.com/FeiSun/BERT4Rec/tree/615eaf2004abecda487a38d5b0c72f3dcfcae5b3)。
 
 原论文明确：Adam，lr **1e-4**，beta **(0.9,0.999)**，weight decay **0.01**，学习率线性衰减，梯度范数阈值 **5**，2 层；文字称 heads=2，并说明每 head 维度32；batch **256**；Beauty/Steam 历史长 **50**；Beauty mask **0.6**，Steam mask **0.4**。目标为 masked-item 全目录交叉熵，不是 64 负例 BCE。

@@ -425,10 +425,12 @@ def aggregate_rows(rows):
     groups = {}
     for row in rows:
         suffix = Path(row["report"]).name
-        groups.setdefault((row["dataset"], row["experiment"], suffix), []).append(row)
+        protocol = row.get("evaluation_protocol", "full_catalog")
+        groups.setdefault((row["dataset"], row["experiment"], suffix, protocol), []).append(row)
     aggregates = []
-    for (dataset, arm, report), group in sorted(groups.items()):
-        item = {"dataset": dataset, "experiment": arm, "report_kind": report, "runs": len(group)}
+    for (dataset, arm, report, protocol), group in sorted(groups.items()):
+        item = {"dataset": dataset, "experiment": arm, "report_kind": report,
+                "evaluation_protocol": protocol, "runs": len(group)}
         for key in ("hr@5", "ndcg@5", "hr@10", "ndcg@10"):
             array = np.array([r[key] for r in group])
             item[key] = {"mean": float(array.mean()), "std": float(array.std(ddof=1)) if len(array) > 1 else 0.}
@@ -443,6 +445,7 @@ def summary(root):
         result = json.loads(report.read_text(encoding="utf-8"))
         rows.append({"dataset": cfg["dataset"], "experiment": cfg["experiment"], "seed": cfg["seed"],
                      "partition": cfg.get("partition_seed", "default"), "report": str(report.relative_to(root)),
+                     "evaluation_protocol": result["test"].get("evaluation_protocol", "full_catalog"),
                      **{key: result["test"][key] for key in ("hr@5", "ndcg@5", "hr@10", "ndcg@10")}})
     destination = root / "summary"
     destination.mkdir(exist_ok=True)
@@ -497,11 +500,12 @@ def summary(root):
     for filename, name in (("operators.json", "appendix_table9_operators.json"), ("end_to_end.json", "appendix_table11_cost.json")):
         if (root / "efficiency" / filename).exists():
             shutil.copyfile(root / "efficiency" / filename, destination / name)
-    text = ["| Dataset | Experiment | Report | Runs | HR@5 | NDCG@5 | HR@10 | NDCG@10 |",
-            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |"]
+    text = ["Metrics with different evaluation protocols are not directly comparable.", "",
+            "| Dataset | Experiment | Report | Evaluation | Runs | HR@5 | NDCG@5 | HR@10 | NDCG@10 |",
+            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |"]
     for row in aggregates:
         metrics = [f"{row[k]['mean']:.6f} ± {row[k]['std']:.6f}" for k in ("hr@5", "ndcg@5", "hr@10", "ndcg@10")]
-        text.append("| " + " | ".join([row["dataset"], row["experiment"], row["report_kind"], str(row["runs"]), *metrics]) + " |")
+        text.append("| " + " | ".join([row["dataset"], row["experiment"], row["report_kind"], row["evaluation_protocol"], str(row["runs"]), *metrics]) + " |")
     (destination / "tables.md").write_text("\n".join(text) + "\n", encoding="utf-8")
 
 

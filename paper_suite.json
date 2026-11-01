@@ -47,9 +47,9 @@
         "config_source": "BERT4Rec paper section 4.3 and official run_beauty/run_steam (Beauty defaults transferred to Toys/Sports)",
         "hidden_size": 64,
         "training": {"learning_rate": 0.0001, "batch_size": 256, "optimizer": "bert_adam", "weight_decay": 0.01, "optimizer_epsilon": 0.000001, "gradient_clip": 5.0, "warmup_steps": 100, "decay_steps": 400000},
-        "baseline": {"dropout": 0.5, "bert_layers": 2, "bert_heads": 2, "bert_attention_dropout": 0.2, "bert_mask_probability": 0.6, "bert_prediction_transform": true},
+        "baseline": {"dropout": 0.5, "bert_layers": 2, "bert_heads": 2, "bert_attention_dropout": 0.2, "bert_mask_probability": 0.6, "bert_max_length": 50, "bert_max_predictions": 30, "bert_dupe_factor": 10, "bert_eval_negatives": 100, "bert_eval_seed": 12345, "bert_evaluation": "bert_popularity_100", "bert_implementation": "official_615eaf2_pytorch_v2"},
         "datasets": {
-          "Steam": {"hidden_size": 256, "training": {"decay_steps": 800000}, "baseline": {"dropout": 0.2, "bert_mask_probability": 0.4}},
+          "Steam": {"hidden_size": 256, "training": {"decay_steps": 800000}, "baseline": {"dropout": 0.2, "bert_mask_probability": 0.4, "bert_max_predictions": 20, "bert_heads": 8}},
           "Toys": {"config_source": "BERT4Rec official Beauty configuration transferred; no original Toys best configuration published"},
           "Sports": {"config_source": "BERT4Rec official Beauty configuration transferred; no original Sports best configuration published"}
         }
