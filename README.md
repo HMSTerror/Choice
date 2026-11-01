@@ -55,7 +55,7 @@ ChoiceGrow（含其消融）每个训练目录只保留 `choice_best.pt`（验�
 
 ChoiceGrow 使用与 NewChoice 对齐的 DDiT 去噪器、有界 `oricosChoice` 分数和 `sigma_importance` 时间采样，早停耐心值为 100 个 epoch。旧版去噪器的训练结果不能直接复用，请换新输出目录；对齐依据与验证命令见 [实现对齐](docs/NEWCHOICE_ALIGNMENT.md)。
 
-BERT4Rec 对齐作者的固定遮盖副本和模型结构，验证/测试改用真实目标加 100 个流行度负例，报告标为 `bert_popularity_100`，不能与其他模型的全目录指标直接比较。仅重跑 BERT4Rec 的命令及数据适配边界见 [BERT4Rec 核查与重跑](docs/BERT4REC_ALIGNMENT.md)。此次修改后，全流程也请使用新输出目录。
+BERT4Rec 默认使用本轮修正后的 `bert4rec.py`；全流程与单独重跑入口共用这份实现。它对齐作者的固定遮盖副本和模型结构，验证/测试使用真实目标加 100 个流行度负例，报告标为 `bert_popularity_100`。仅重跑 BERT4Rec 的命令及数据适配边界见 [BERT4Rec 核查与重跑](docs/BERT4REC_ALIGNMENT.md)。这些指标不能与其他模型的全目录指标直接比较；此次修改后，全流程请使用新输出目录。
 
 关闭窗口或任务中断后，重新执行相同命令会复用已完成的任务；中断的单个训练备份日志后从头重跑，不累积旧权重。修改配置后请使用新的 `--output`。所有运行产物在 `runs/` 中，均不上传 Git。
 

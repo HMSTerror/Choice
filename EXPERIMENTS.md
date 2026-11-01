@@ -13,7 +13,7 @@
 | `partitions` | Shuffle 与 Real，五个分区种子 × 三个训练种子；分区/训练方差分解与候选集中度、块熵诊断 | 四个数据集 |
 | `efficiency` | 1K—5K 稠密与结构化前向、反向算子时间/误差，三次运行均值；100K 时间/存储/归一化误差与失败计数；Steam 全测试集、batch=1、在线候选生成的端到端耗时 | 当前硬件实测；端到端使用预先固定的 seed=100 |
 
-无上限早停与邻居增强沿用本项目设置。论文正文的 300 轮上限不覆盖用户指定的默认值。默认正式测试为三个采样流，种子按 `SHA256(run_seed:split:stream)` 派生；三个流先各自计算指标，再取均值。
+无上限早停与邻居增强沿用本项目设置。论文正文的 300 轮上限不覆盖用户指定的默认值。扩散模型正式测试为三个采样流，种子按 `SHA256(run_seed:split:stream)` 派生；三个流先各自计算指标，再取均值。BERT4Rec 为固定候选集上的一次确定性评估，独立训练次数仍由主表种子设置决定。
 
 ## 选择规则
 
@@ -25,14 +25,14 @@
 
 ## 主表模型实现与数据适配
 
-`baselines.py` 是统一历史输入和全目录评分下的本地适配实现，各方法有独立结构、扰动对象和目标函数。它们不依赖本地其他工程或运行时下载的基线仓库。
+`baselines.py` 使用现有历史输入，各方法有独立结构、扰动对象和目标函数。BERT4Rec 默认调用本轮修正后的 `bert4rec.py`，使用真实目标加 100 个流行度负例评估；其他模型保留全目录评估。汇总带评估协议字段，不同协议的指标不能直接比较。它们不依赖本地其他工程或运行时下载的基线仓库。
 
 | 模型 | 实现 |
 | --- | --- |
 | SASRec | 一层因果 Transformer，ID 嵌入；正例与 64 个采样负例的 logistic 目标。候选只使用历史，排除历史中的物品，不读取目标。 |
 | GRU4Rec | 首发 RSC15 TOP1 示例：单层100维、批内负例、tanh 输出、hidden dropout .5，lr .01、batch50、Adagrad（epsilon在平方根内）。三个独立 one-hot 输入门矩阵；按当前独立历史样本训练，不能恢复 session-parallel 状态传递。 |
 | Caser | 最后5项历史、50维，垂直4/水平16通道，独立输出物品矩阵和偏置；3负例 BCE、Adam lr .001、batch100、dropout .5、L2 1e-6。缺用户 ID 与多未来目标，保留历史表示、单目标适配。 |
-| BERT4Rec | 两层双向 Transformer，Beauty/Toys/Sports hidden64、mask .6，Steam hidden256、mask .4；论文文字heads2；hidden dropout分别 .5/.2，attention dropout .2。lr1e-4、batch256、uncorrected BERT Adam、decay .01、clip5、warmup100、40万/80万步线性衰减。保留提供的历史10而非原作者50。 |
+| BERT4Rec | 修正后的官方结构移植：两层双向 Transformer，Beauty/Toys/Sports hidden64、2 heads、mask .6；Steam hidden256、8 heads、mask .4。hidden dropout分别 .5/.2，attention dropout .2；10 份全 MASK 固定遮盖副本加 mask-last。lr1e-4、batch256、uncorrected BERT Adam、decay .01、clip5、warmup100、40万/80万步线性衰减。右侧补齐、50 位置容量，实际历史仍为源数据提供的最多10项。验证/测试为目标 + 100 个流行度负例，见 [实现核查](docs/BERT4REC_ALIGNMENT.md)。 |
 | PreferDiff | Amazon原生3072维固定白化特征和模型，Steam为现有768维；cosine重建偏好目标。论文Table12：Beauty lambda .8/w6、Toys .5/w4、Sports .4/w2；Steam缺原始最佳点，使用默认lambda .5/w4。AdamW lr1e-4、batch256、condition dropout .1、2000步训练、论文20步DDIM。 |
 | DiffRec | **Wang 等的交互向量版本**；使用官方main.py默认AdamW lr1e-4、batch400、MLP[1000]、time10、x0、linear-var、T100、noise scale .1/min .0001/max .02、SNR加权、sampling_steps0和确定性逆向更新。原论文没有当前四数据集的最佳点。 |
 | DDSR | arXiv:2410.23994 的 **OPQ + Uniform** 路径：32 个 256 项码本，余弦累计保留率、1000 步；扰动整个历史的语义码，逐位置预测下一物品的干净语义码并计算交叉熵。推理从历史码开始，用式 (7) 的联合边缘概率归一化后迭代跳步采样，最后按码本质心距离给全目录排序。 |

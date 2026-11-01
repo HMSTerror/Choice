@@ -2,6 +2,8 @@
 
 对照版本：[FeiSun/BERT4Rec @615eaf2](https://github.com/FeiSun/BERT4Rec/tree/615eaf2004abecda487a38d5b0c72f3dcfcae5b3)。本项目采用 PyTorch 移植，模型在 `bert4rec.py`，正式训练入口在 `baselines.py`。
 
+本轮三个数据集单次重跑采用的实现已作为默认 BERT4Rec：`experiments.py` 的主表任务和 `rerun_bert.py` 均通过 `baselines.py` 使用同一个类、固定遮盖训练及采样评估流程。配置标识为 `official_615eaf2_pytorch_v2`，不再使用旧的通用 EncoderLayer 实现。
+
 ## 核查与修改
 
 | 项目 | 修改前 | 官方实现及此次修改 |
@@ -42,6 +44,8 @@ python -u rerun_bert.py \
 ```
 
 共 9 次训练。实时日志显示在当前窗口，每次验证集选好模型后立即测试；权重只在内存保留，不保存 checkpoint。中断的单次训练从头开始，已完成的训练跳过。旧主表结果留在原目录。
+
+先在每个数据集只跑 1 次时，将命令中的种子改为 `--seeds 100`，并指定独立输出目录，例如 `--output runs/bert_official_seed100`，共 3 次训练。主表默认的 3 runs 设置仍为 seed 100–102。
 
 - 每次结果：`runs/bert_official/experiments/<数据集>/bert4rec/seed_<种子>/report.json`
 - 固定验证/测试候选：同级 `bert_val_candidates.npy`、`bert_test_candidates.npy`，第 0 列为真实目标。
